@@ -1,0 +1,39 @@
+# Smart Commute Advisor — heat-safety theme
+# Warm neutral base + green/yellow/orange/red semantic risk colors.
+
+[theme]
+base = "light"
+primaryColor = "#C2410C"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F7F4EF"
+textColor = "#27272A"
+borderColor = "#E4DDD2"
+
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@600;700;800&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+
+baseRadius = "medium"
+showWidgetBorder = true
+showSidebarBorder = true
+linkUnderline = false
+
+# Semantic risk palette (green / yellow / orange / red)
+greenColor = "#15803D"
+yellowColor = "#A16207"
+orangeColor = "#C2410C"
+redColor = "#B91C1C"
+blueColor = "#0369A1"
+violetColor = "#6D28D9"
+grayColor = "#71717A"
+
+chartCategoricalColors = ["#15803D", "#F59E0B", "#DC2626", "#0369A1", "#6D28D9", "#71717A"]
+# Sequential heat ramp (10 colors) — light amber to deep red
+chartSequentialColors = ["#FEF3C7", "#FDE68A", "#FCD34D", "#FBBF24", "#F59E0B", "#F97316", "#EA580C", "#DC2626", "#B91C1C", "#7F1D1D"]
+
+dataframeBorderColor = "#E4DDD2"
+dataframeHeaderBackgroundColor = "#F7F4EF"
+
+[theme.sidebar]
+backgroundColor = "#F7F4EF"
+secondaryBackgroundColor = "#EFEBE3"
