@@ -67,4 +67,4 @@ smart_commute_advisor/
 - Could extend with: polygon drawing for custom AOIs, tree-cover/shade data from Satellite Segmentation, or an LLM-generated natural-language summary layer on top of the existing logic
 
 ## Live Demo
-https://smart-commute-advisor-8eeztc72ervmwezyp8b2vh.streamlit.app/
+https://smart-commute-advisor.streamlit.app/
