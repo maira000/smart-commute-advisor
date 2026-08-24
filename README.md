@@ -65,3 +65,6 @@ smart_commute_advisor/
 - Currently covers 6 sample Phoenix-area locations (~1.5 km square AOI each)
 - Threshold is adjustable via slider (90–115°F); converted to °C automatically for live calls
 - Could extend with: polygon drawing for custom AOIs, tree-cover/shade data from Satellite Segmentation, or an LLM-generated natural-language summary layer on top of the existing logic
+
+## Live Demo
+https://smart-commute-advisor-8eeztc72ervmwezyp8b2vh.streamlit.app/
