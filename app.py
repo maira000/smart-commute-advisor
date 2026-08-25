@@ -45,6 +45,11 @@ st.set_page_config(
     layout="wide",
 )
 
+if "temp_unit" not in st.session_state:
+    st.session_state.temp_unit = "°F"
+if "threshold_f" not in st.session_state:
+    st.session_state.threshold_f = 100.0
+
 # ----------------------------------------------------------------------
 # SAMPLE / CACHED DATA GENERATION
 # (Replace this section with real cached FortyGuard data when ready)
@@ -92,6 +97,28 @@ RISK_HEX = {
 }
 
 PHOENIX_CENTER = {"lat": 33.4350, "lon": -111.9950}
+
+
+# ----------------------------------------------------------------------
+# TEMPERATURE UNIT CONVERSION
+# Internal representation is always °F. Conversion happens only at display.
+# ----------------------------------------------------------------------
+
+def f_to_c(f: float) -> float:
+    """Converts Fahrenheit to Celsius (rounded to 1 decimal)."""
+    return round((f - 32) * 5 / 9, 1)
+
+
+def fmt_temp(temp_f: float, unit: str) -> str:
+    """Formats a °F value in the given unit, e.g. '100°F' or '37.8°C'."""
+    if unit == "°C":
+        return f"{f_to_c(temp_f)}°C"
+    return f"{temp_f:.0f}°F"
+
+
+def unit_label(unit: str) -> str:
+    """Returns the threshold slider label for the given unit."""
+    return f"Heat risk threshold ({unit})"
 
 
 def fmt_hour(hour: int) -> str:
@@ -216,6 +243,7 @@ def build_nl_summary(
     df: pd.DataFrame,
     safe_window,
     comparison_df: pd.DataFrame,
+    unit: str = "°F",
 ) -> str:
     """
     Composes a short plain-English recommendation from the analysis results.
@@ -240,10 +268,10 @@ def build_nl_summary(
     if exceedance == 0:
         return (
             f"It's a clear day in {area_name}: temperatures stay below "
-            f"{threshold_f:.0f}°F from open to close, so {activity} is comfortable "
+            f"{fmt_temp(threshold_f, unit)} from open to close, so {activity} is comfortable "
             f"whenever it suits you. The most pleasant stretch sits around "
             f"{fmt_hour(int(coolest_row['hour']))} at roughly "
-            f"{float(coolest_row['temp_f']):.0f}°F."
+            f"{fmt_temp(float(coolest_row['temp_f']), unit)}."
         )
 
     streak = result["longest_streak"]
@@ -257,17 +285,17 @@ def build_nl_summary(
         start_h, end_h = safe_window
         return (
             f"For {activity} in {area_name}, aim for {fmt_hour(start_h)} – "
-            f"{fmt_hour(end_h)}, when conditions hold under {threshold_f:.0f}°F. "
+            f"{fmt_hour(end_h)}, when conditions hold under {fmt_temp(threshold_f, unit)}. "
             f"From {fmt_hour(hot_window_range(result['hot_hours'])[0])} onward, "
             f"expect {exceedance} hr{'s' if exceedance != 1 else ''} above "
-            f"{threshold_f:.0f}°F, peaking near {peak_temp:.0f}°F around "
+            f"{fmt_temp(threshold_f, unit)}, peaking near {fmt_temp(peak_temp, unit)} around "
             f"{peak_time}.{streak_note}{alt_clause}"
         )
 
     return (
         f"There's no fully safe window for {activity} in {area_name} today — "
-        f"{exceedance} tracked hours run above {threshold_f:.0f}°F, topping out "
-        f"near {peak_temp:.0f}°F around {peak_time}.{streak_note} Move it to "
+        f"{exceedance} tracked hours run above {fmt_temp(threshold_f, unit)}, topping out "
+        f"near {fmt_temp(peak_temp, unit)} around {peak_time}.{streak_note} Move it to "
         f"early morning, shift it indoors, or pick a cooler area.{alt_clause}"
     )
 
@@ -337,7 +365,7 @@ def build_area_summaries(date: str, threshold_f: float, use_live: bool) -> pd.Da
     return pd.DataFrame(rows).sort_values("Hours above threshold").reset_index(drop=True)
 
 
-def build_risk_map(comparison_df: pd.DataFrame, selected_area: str) -> folium.Map:
+def build_risk_map(comparison_df: pd.DataFrame, selected_area: str, unit: str = "°F") -> folium.Map:
     """
     Interactive Phoenix map (OpenStreetMap tiles) with one risk-colored marker
     per area. The selected area gets a highlight ring.
@@ -359,13 +387,15 @@ def build_risk_map(comparison_df: pd.DataFrame, selected_area: str) -> folium.Ma
         hex_color = RISK_HEX.get(row["_color"], "#71717A")
         is_selected = name == selected_area
 
+        peak_display = fmt_temp(float(row['Peak temp (°F)']), unit)
+        peak_html = peak_display.replace("°", "&deg;")
         popup_html = f"""
         <div style="font-family: Inter, sans-serif; min-width: 190px;">
           <div style="font-weight: 700; font-size: 14px; margin-bottom: 4px;">{name}</div>
           <div style="color: {hex_color}; font-weight: 600;">&#9679; {row['Risk level']}</div>
           <div style="margin-top: 6px; font-size: 12px; color: #333;">
             Hours above threshold: <b>{int(row['Hours above threshold'])}</b><br>
-            Peak temp: <b>{row['Peak temp (°F)']:.0f}&deg;F</b><br>
+            Peak temp: <b>{peak_html}</b><br>
             Best window: <b>{row['Best window']}</b><br>
             Data source: <b>{row['Data']}</b>
           </div>
@@ -401,11 +431,21 @@ def build_risk_map(comparison_df: pd.DataFrame, selected_area: str) -> folium.Ma
     return m
 
 
-def daily_temperature_chart(df: pd.DataFrame, result: dict, threshold_f: float):
+def daily_temperature_chart(df: pd.DataFrame, result: dict, threshold_f: float, unit: str):
     """Hourly temperature bars colored by safe/hot, plus a dashed threshold line."""
     chart_df = df.copy()
     hour_order = sorted(int(h) for h in chart_df["hour"].tolist())
     chart_df["Time"] = chart_df["hour"].apply(fmt_hour)
+
+    if unit == "°C":
+        chart_df["temp_display"] = chart_df["temp_f"].apply(f_to_c)
+        threshold_display = f_to_c(threshold_f)
+        temp_title = "Temp (°C)"
+    else:
+        chart_df["temp_display"] = chart_df["temp_f"]
+        threshold_display = threshold_f
+        temp_title = "Temp (°F)"
+
     chart_df["Status"] = chart_df["hour"].apply(
         lambda h: "Above threshold" if h in result["hot_hours"] else "Safe"
     )
@@ -426,7 +466,7 @@ def daily_temperature_chart(df: pd.DataFrame, result: dict, threshold_f: float):
                     ),
                 ),
             ),
-            y=alt.Y("temp_f:Q", title="Temp (°F)", scale=alt.Scale(zero=False, padding=8)),
+            y=alt.Y("temp_display:Q", title=temp_title, scale=alt.Scale(zero=False, padding=8)),
             color=alt.Color(
                 "Status:N",
                 scale=alt.Scale(domain=["Safe", "Above threshold"], range=[SAFE_COLOR, HOT_COLOR]),
@@ -434,16 +474,16 @@ def daily_temperature_chart(df: pd.DataFrame, result: dict, threshold_f: float):
             ),
             tooltip=[
                 alt.Tooltip("Time:N", title="Time"),
-                alt.Tooltip("temp_f:Q", title="Temp (°F)", format=".1f"),
+                alt.Tooltip("temp_display:Q", title=temp_title, format=".1f"),
                 alt.Tooltip("Status:N", title=None),
             ],
         )
     )
 
     rule = (
-        alt.Chart(pd.DataFrame({"threshold_f": [threshold_f]}))
+        alt.Chart(pd.DataFrame({"threshold_display": [threshold_display]}))
         .mark_rule(strokeDash=[5, 4], color=THRESHOLD_LINE_COLOR, strokeWidth=2)
-        .encode(y=alt.Y("threshold_f:Q", title="Temp (°F)"))
+        .encode(y=alt.Y("threshold_display:Q", title=temp_title))
     )
 
     st.altair_chart((bars + rule).resolve_scale(y="shared"))
@@ -467,14 +507,38 @@ with st.sidebar:
     )
     activity = activity or "Walking"
 
+    temp_unit = st.segmented_control(
+        "Temperature unit",
+        options=["°F", "°C"],
+        key="temp_unit",
+    )
+
+    if temp_unit == "°C":
+        slider_min = f_to_c(90)
+        slider_max = f_to_c(115)
+        slider_step = 0.1
+        slider_val = f_to_c(st.session_state.threshold_f)
+    else:
+        slider_min = 90.0
+        slider_max = 115.0
+        slider_step = 1.0
+        slider_val = st.session_state.threshold_f
+
     threshold_f = st.slider(
-        "Heat risk threshold (°F)",
-        min_value=90,
-        max_value=115,
-        value=100,
-        step=1,
+        unit_label(temp_unit),
+        min_value=slider_min,
+        max_value=slider_max,
+        value=slider_val,
+        step=slider_step,
+        format="%.1f" if temp_unit == "°C" else "%d",
         help="Hours above this temperature count as risky exposure.",
     )
+
+    if temp_unit == "°C":
+        st.session_state.threshold_f = round(threshold_f * 9 / 5 + 32, 1)
+    else:
+        st.session_state.threshold_f = float(threshold_f)
+    threshold_f = st.session_state.threshold_f
 
     data_source_label = st.segmented_control(
         "Data source",
@@ -665,14 +729,14 @@ with st.container(border=True):
             st.markdown(f"## :red[{fmt_hour(int(coolest['hour']))}]")
             st.caption(
                 f":material/warning: No fully safe window today — coolest hour shown "
-                f"({coolest['temp_f']}°F)"
+                f"({fmt_temp(float(coolest['temp_f']), temp_unit)})"
             )
     with rec_right:
         if hot_span:
             hot_start, hot_end = hot_span
             st.markdown(f"## :red[{fmt_hour(hot_start)} – {fmt_hour(hot_end)}]")
             st.caption(
-                f":material/local_fire_department: Avoid — {len(result['hot_hours'])} hrs above {threshold_f}°F"
+                f":material/local_fire_department: Avoid — {len(result['hot_hours'])} hrs above {fmt_temp(threshold_f, temp_unit)}"
             )
         else:
             st.markdown(f"## :green[All day]")
@@ -680,14 +744,14 @@ with st.container(border=True):
 
 if result["exceedance_hours"] > 0:
     st.warning(
-        f"Heat advisory for **{area_name}**: temperatures exceed **{threshold_f}°F** between "
+        f"Heat advisory for **{area_name}**: temperatures exceed **{fmt_temp(threshold_f, temp_unit)}** between "
         f"**{fmt_hour(hot_span[0])}** and **{fmt_hour(hot_span[1])}**. Shift your "
         f"{activity.lower()} earlier or later, or pick a shadier area below.",
         icon=":material/warning:",
     )
 else:
     st.success(
-        f"{area_name} stays below **{threshold_f}°F** all day — any time works for your {activity.lower()}.",
+        f"{area_name} stays below **{fmt_temp(threshold_f, temp_unit)}** all day — any time works for your {activity.lower()}.",
         icon=":material/check_circle:",
     )
 
@@ -695,7 +759,8 @@ else:
 # UI — NATURAL-LANGUAGE SUMMARY (rule-based, offline, zero cost)
 # ----------------------------------------------------------------------
 nl_summary = build_nl_summary(
-    area_name, activity, threshold_f, result, df, safe_window, comparison_df
+    area_name, activity, threshold_f, result, df, safe_window, comparison_df,
+    unit=temp_unit,
 )
 with st.container(border=True):
     st.markdown("**:material/quick_reference_all: In plain english**")
@@ -708,10 +773,15 @@ peak_temp = float(df["temp_f"].max())
 coolest_row = df.loc[df["temp_f"].idxmin()]
 
 with st.container(horizontal=True):
+    peak_delta_f = peak_temp - threshold_f
+    if temp_unit == "°C":
+        peak_delta_str = f"{peak_delta_f * 5 / 9:+.1f}°C vs threshold"
+    else:
+        peak_delta_str = f"{peak_delta_f:+.0f}°F vs threshold"
     st.metric(
         "Peak temperature",
-        f"{peak_temp:.0f}°F",
-        delta=f"{peak_temp - threshold_f:+.0f}°F vs threshold",
+        fmt_temp(peak_temp, temp_unit),
+        delta=peak_delta_str,
         delta_color="inverse" if peak_temp > threshold_f else "off",
         border=True,
         chart_data=df["temp_f"].tolist(),
@@ -734,7 +804,7 @@ with st.container(horizontal=True):
     st.metric(
         "Coolest hour",
         fmt_hour(int(coolest_row["hour"])),
-        delta=f"{coolest_row['temp_f']:.0f}°F",
+        delta=fmt_temp(float(coolest_row["temp_f"]), temp_unit),
         delta_color="off",
         border=True,
     )
@@ -746,7 +816,7 @@ col_map, col_chart = st.columns([3, 2])
 
 with col_map:
     st.subheader("Heat-risk map")
-    risk_map = build_risk_map(comparison_df, area_name)
+    risk_map = build_risk_map(comparison_df, area_name, unit=temp_unit)
     st_folium(risk_map, height=430, use_container_width=True)
     st.markdown(
         ":green[● Low] &nbsp; :yellow[● Moderate] &nbsp; "
@@ -756,8 +826,8 @@ with col_map:
 
 with col_chart:
     st.subheader(f"Hourly heat curve — {date}")
-    daily_temperature_chart(df, result, threshold_f)
-    st.caption(f"Dashed line marks your {threshold_f}°F threshold. Red bars are hours of risky exposure.")
+    daily_temperature_chart(df, result, threshold_f, temp_unit)
+    st.caption(f"Dashed line marks your {fmt_temp(threshold_f, temp_unit)} threshold. Red bars are hours of risky exposure.")
 
 # ----------------------------------------------------------------------
 # UI — COMPARE ALL AREAS
@@ -773,9 +843,15 @@ else:
     st.caption("Sorted by safest first — fewer hours above your threshold means a cooler, safer area.")
 
 st.dataframe(
-    comparison_df,
+    comparison_df.assign(**{
+        f"Peak temp ({temp_unit})": comparison_df["Peak temp (°F)"].apply(
+            lambda t: f_to_c(t) if temp_unit == "°C" else t
+        ),
+    }),
     column_config={
         "_color": None,
+        "Peak temp (°F)": None if temp_unit == "°C" else st.column_config.NumberColumn(format="%.1f °F"),
+        f"Peak temp ({temp_unit})": st.column_config.NumberColumn(format="%.1f" + f" {temp_unit}"),
         "Risk level": st.column_config.TextColumn(width="medium"),
         "Hours above threshold": st.column_config.ProgressColumn(
             min_value=0,
@@ -783,7 +859,6 @@ st.dataframe(
             format="%d hrs",
         ),
         "Longest hot streak": st.column_config.NumberColumn(format="%d hrs"),
-        "Peak temp (°F)": st.column_config.NumberColumn(format="%.1f °F"),
         "Best window": st.column_config.TextColumn(width="medium"),
     },
     hide_index=True,
