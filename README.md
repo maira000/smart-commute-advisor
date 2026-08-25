@@ -68,3 +68,6 @@ smart_commute_advisor/
 
 ## Live Demo
 https://smart-commute-advisor.streamlit.app/
+
+## Author: 
+[Maira Naveed](https://www.linkedin.com/in/maira-naveed-b8689521a/)
