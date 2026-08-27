@@ -819,9 +819,12 @@ with col_map:
     risk_map = build_risk_map(comparison_df, area_name, unit=temp_unit)
     st_folium(risk_map, height=430, use_container_width=True)
     st.markdown(
-        ":green[● Low] &nbsp; :yellow[● Moderate] &nbsp; "
-        ":orange[● High] &nbsp; :red[● Extreme] — larger circles = more hours above threshold. "
-        "Click any marker for details."
+        f'<span style="color:{RISK_HEX["green"]}">● Low</span> &nbsp; '
+        f'<span style="color:{RISK_HEX["yellow"]}">● Moderate</span> &nbsp; '
+        f'<span style="color:{RISK_HEX["orange"]}">● High</span> &nbsp; '
+        f'<span style="color:{RISK_HEX["red"]}">● Extreme</span> — '
+        "larger circles = more hours above threshold. Click any marker for details.",
+        unsafe_allow_html=True,
     )
 
 with col_chart:
