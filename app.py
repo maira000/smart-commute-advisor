@@ -162,6 +162,105 @@ def generate_sample_heatmap(area_name: str, date: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl="1h", max_entries=256)
+def generate_demo_payload(
+    area_name: str,
+    date: str,
+    analytic_type: str = "tcm",
+    threshold_f: float = 100.0,
+) -> dict:
+    """
+    Builds a small simulated FortyGuard heatmap payload shaped exactly like the
+    real cache files: {"map_data": <GeoJSON>, "stats_data": {...}}.
+
+    For 'tcm' each tile carries a temperature (degrees C); for 'exceedance' /
+    'persistence' each tile carries an exposure hours value. Used both to render
+    demo tile layers and to fall back gracefully when a live fetch fails.
+
+    A real payload equivalent comes from client.create_heatmap(...) with the
+    matching analytic_type.
+    """
+    area = PHOENIX_AREAS[area_name]
+    rng = random.Random(zlib.crc32(f"{area_name}|{date}|{analytic_type}|{threshold_f}".encode()))
+
+    # A small cluster of polygon tiles centered on the area's coordinates.
+    half_lat = 0.012
+    half_lon = 0.014
+
+    features = []
+    tile_hours: list[float] = []
+
+    if analytic_type == "tcm":
+        # Distribute temperatures around the demo hourly peak (converted to °C).
+        peak_df = generate_sample_heatmap(area_name, date)
+        peak_c = float((peak_df["temp_f"].max() - 32) * 5 / 9)
+        for i, j in ((0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (1, 2)):
+            temp_c = round(peak_c + rng.uniform(-4.0, 3.0), 2)
+            _add_demo_tile(features, area, i, j, half_lat, half_lon, {"temperature": temp_c})
+            tile_hours.append(temp_c)
+    else:
+        # Exposure hours: hotter tiles get more hours above threshold.
+        max_hours = len(HOURS)
+        for i, j in ((0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (1, 2)):
+            hours = round(
+                min(max_hours, max(0.0, rng.uniform(0.5, max_hours - 1.5) +
+                                   (j * 0.8 - 0.8))),
+                1,
+            )
+            _add_demo_tile(features, area, i, j, half_lat, half_lon, {"value": hours})
+            tile_hours.append(hours)
+
+    map_data = {
+        "type": "FeatureCollection",
+        "features": features,
+    }
+
+    if analytic_type == "tcm":
+        stats_data = {
+            "Temperature_stats": {
+                "Minimum": min(tile_hours),
+                "Maximum": max(tile_hours),
+                "Mean": round(sum(tile_hours) / len(tile_hours), 2),
+            }
+        }
+    else:
+        stats_data = {
+            "Exposure_stats": {
+                "Minimum": min(tile_hours),
+                "Maximum": max(tile_hours),
+                "Mean": round(sum(tile_hours) / len(tile_hours), 2),
+            }
+        }
+
+    return {"map_data": map_data, "stats_data": stats_data}
+
+
+def _add_demo_tile(
+    features: list,
+    area: dict,
+    i: int,
+    j: int,
+    half_lat: float,
+    half_lon: float,
+    properties: dict,
+) -> None:
+    """Appends one square-ish polygon tile to a features list."""
+    lat0 = area["lat"] + i * half_lat
+    lon0 = area["lon"] + j * half_lon
+    ring = [
+        [lon0, lat0],
+        [lon0 + half_lon, lat0],
+        [lon0 + half_lon, lat0 + half_lat],
+        [lon0, lat0 + half_lat],
+        [lon0, lat0],
+    ]
+    features.append({
+        "type": "Feature",
+        "properties": properties,
+        "geometry": {"type": "Polygon", "coordinates": [ring]},
+    })
+
+
+@st.cache_data(ttl="1h", max_entries=256)
 def compute_exceedance(df: pd.DataFrame, threshold_f: float) -> dict:
     """
     Simulates FortyGuard's analytic_type='exceedance':
@@ -340,6 +439,127 @@ def _area_summary_row(name: str, area_df: pd.DataFrame, provenance: str, thresho
     }
 
 
+# ----------------------------------------------------------------------
+# TILE-LEVEL VALUE EXTRACTION + COLOR SCALING
+# (Used to overlay the FortyGuard GeoJSON 'map_data' tiles on the map.)
+# ----------------------------------------------------------------------
+
+def extract_tile_value(feature: dict, analytic_type: str) -> float:
+    """
+    Pulls the numeric value out of a single FortyGuard map tile.
+
+    For 'tcm' the tiles carry a temperature (properties.temperature or temp);
+    for 'exceedance'/'persistence' they carry hours above threshold
+    (properties.value or value_hour). Falls back to 0.0 so a missing tile
+    never crashes the renderer.
+    """
+    properties = feature.get("properties", {}) if isinstance(feature, dict) else {}
+    if not isinstance(properties, dict):
+        return 0.0
+    if analytic_type != "tcm":
+        return properties.get("value") or properties.get("value_hour") or 0.0
+    return properties.get("temperature") or properties.get("temp") or 0.0
+
+
+def tile_value_scale(analytic_type: str):
+    """
+    Returns (label, colors, is_exposure) describing how tile values map to
+    colors for the active analytic type.
+
+    tcm            -> temperature, cool (blue) to hot (red)
+    exceedance/persistence -> exposure hours, pale green/yellow (0h) to
+                              deep red/orange (6h+).
+    """
+    if analytic_type == "tcm":
+        return "Temperature", ["#2E7CF6", "#10B981", "#FBBF24", "#F97316", "#DC2626"], False
+    return "Hours above threshold", ["#EAF6C0", "#FCD34D", "#FB923C", "#F97316", "#B91C1C"], True
+
+
+def tile_color(value: float, vmin: float, vmax: float, colors: list) -> str:
+    """
+    Interpolates a hex color for a value in [vmin, vmax] across the palette.
+    Handles the degenerate vmin == vmax case by returning the first color.
+    """
+    if vmax <= vmin:
+        return colors[0]
+    t = max(0.0, min(1.0, (value - vmin) / (vmax - vmin)))
+    scaled = t * (len(colors) - 1)
+    lower = int(scaled)
+    upper = min(lower + 1, len(colors) - 1)
+    frac = scaled - lower
+    return _lerp_hex(colors[lower], colors[upper], frac)
+
+
+def _lerp_hex(c1: str, c2: str, frac: float) -> str:
+    """Linearly blends two '#RRGGBB' colors."""
+    a = _hex_to_rgb(c1)
+    b = _hex_to_rgb(c2)
+    rgb = [round(a[i] + (b[i] - a[i]) * frac) for i in range(3)]
+    return "#{:02X}{:02X}{:02X}".format(*rgb)
+
+
+def _hex_to_rgb(hex_color: str) -> list:
+    hex_color = hex_color.lstrip("#")
+    return [int(hex_color[i:i + 2], 16) for i in (0, 2, 4)]
+
+
+def build_tile_layer(
+    payload: dict,
+    analytic_type: str,
+) -> folium.FeatureGroup:
+    """
+    Renders the FortyGuard GeoJSON 'map_data' tiles as translucent filled
+    polygons colored by each tile's value via tile_color(). Returns a
+    FeatureGroup ready to add to a folium map.
+    """
+    tiles = folium.FeatureGroup(name="Tiles")
+
+    if not isinstance(payload, dict):
+        return tiles
+    map_data = payload.get("map_data")
+    features = map_data.get("features") if isinstance(map_data, dict) else None
+    if not features:
+        return tiles
+
+    label, colors, is_exposure = tile_value_scale(analytic_type)
+    if is_exposure:
+        # Exposure hours use a fixed 0 → 6+ scale so that 0 hrs reads
+        # light yellow/green and anything >= 6 hrs reads deep red/orange,
+        # regardless of the spread across the fetched tiles.
+        vmin, vmax = 0.0, 6.0
+    else:
+        values = [extract_tile_value(f, analytic_type) for f in features]
+        vmin = float(min(values))
+        vmax = float(max(values))
+        if vmax - vmin < 1e-9:
+            vmax = vmin + 5.0
+
+    for feature in features:
+        geometry = (feature or {}).get("geometry") or {}
+        if geometry.get("type") != "Polygon":
+            continue
+        coords = geometry.get("coordinates")
+        if not coords:
+            continue
+        # Leaflet expects [lat, lon]; GeoJSON polygons carry [lon, lat].
+        ring = [[lat, lon] for lon, lat in coords[0]]
+
+        value = extract_tile_value(feature, analytic_type)
+        color = tile_color(value, vmin, vmax, colors)
+
+        folium.Polygon(
+            locations=ring,
+            color="#FFFFFF",
+            weight=1,
+            fill=True,
+            fill_color=color,
+            fill_opacity=0.55,
+            tooltip=f"{label}: <b>{value:g}</b>",
+        ).add_to(tiles)
+
+    return tiles
+
+
 def build_area_summaries(date: str, threshold_f: float, use_live: bool) -> pd.DataFrame:
     """
     Per-area risk summary for the map + table.
@@ -365,10 +585,18 @@ def build_area_summaries(date: str, threshold_f: float, use_live: bool) -> pd.Da
     return pd.DataFrame(rows).sort_values("Hours above threshold").reset_index(drop=True)
 
 
-def build_risk_map(comparison_df: pd.DataFrame, selected_area: str, unit: str = "°F") -> folium.Map:
+def build_risk_map(
+    comparison_df: pd.DataFrame,
+    selected_area: str,
+    unit: str = "°F",
+    tile_layer: folium.FeatureGroup = None,
+    analytic_type: str = "tcm",
+) -> folium.Map:
     """
     Interactive Phoenix map (OpenStreetMap tiles) with one risk-colored marker
-    per area. The selected area gets a highlight ring.
+    per area. When a tile_layer (GeoJSON tiles from map_data) is provided it is
+    drawn beneath the markers so judges can see the underlying FortyGuard tiles.
+    The selected area gets a highlight ring.
     """
     m = folium.Map(
         location=[PHOENIX_CENTER["lat"], PHOENIX_CENTER["lon"]],
@@ -376,6 +604,9 @@ def build_risk_map(comparison_df: pd.DataFrame, selected_area: str, unit: str = 
         tiles="OpenStreetMap",
         control_scale=True,
     )
+
+    if tile_layer is not None:
+        tile_layer.add_to(m)
 
     points = []
     for _, row in comparison_df.iterrows():
@@ -639,20 +870,64 @@ def render_fetch_panel(area_name: str, date: str, analytic_type: str, threshold_
                     st.error(str(exc), icon=":material/error:")
 
 
-def render_live_summary(payload: dict):
-    """Shown when a cached live payload has aggregates but no hourly series."""
-    st.info(
-        "The cached live result contains aggregate analytics but no hourly temperature "
-        "series, so time-window recommendations aren't available for it. Fetch with "
-        "analytic type **tcm** (single day) to get tile temperatures instead.",
-        icon=":material/analytics:",
-    )
-    summary = summarize_result(payload)
+def render_live_summary(payload: dict, analytic_type: str = "tcm", temp_unit: str = "°F"):
+    """
+    Shows aggregate KPI cards from a cached live payload.
+
+    Headers and units adapt to the analytic type:
+      - tcm           -> temperature snapshot, values in °C / °F
+      - exceedance / persistence -> exposure hours, values in 'hrs'
+
+    Tiles in the AOI are always shown; Min/Mean/Max reflect the relevant
+    stats (case-insensitive key lookup) so nothing renders as empty '—'.
+    """
+    is_exposure = analytic_type != "tcm"
+
+    if is_exposure:
+        st.info(
+            f"Live `{analytic_type}` analytics loaded — this measures **hours** "
+            "each tile spends above the threshold rather than temperature, so "
+            "time-window recommendations are based on tile exposure, not an "
+            "hourly temperature curve.",
+            icon=":material/analytics:",
+        )
+    else:
+        st.info(
+            "The cached live result contains aggregate analytics but no hourly "
+            "temperature series, so time-window recommendations aren't available "
+            "for it. Fetch with analytic type **tcm** (single day) to get tile "
+            "temperatures instead.",
+            icon=":material/analytics:",
+        )
+
+    summary = summarize_result(payload, analytic_type=analytic_type)
+
+    min_val = summary.get("min")
+    mean_val = summary.get("mean")
+    max_val = summary.get("max")
+
+    if is_exposure:
+        header_min, header_mean, header_max = "Min Exposure", "Average Exposure", "Max Exposure"
+    else:
+        header_min, header_mean, header_max = "Min Temp", "Mean Temp", "Max Temp"
+
+    def _fmt(value, exposure: bool) -> str:
+        if value is None:
+            return "—"
+        if exposure:
+            return f"{value:g} hrs"
+        return fmt_temp(float(value) * 9.0 / 5.0 + 32.0, temp_unit) if temp_unit == "°F" \
+            else f"{value:g}°C"
+
     cols = st.columns(4)
     cols[0].metric("Tiles in AOI", summary.get("tile_count", "—"))
-    cols[1].metric("Min (°C)", summary.get("min", "—"))
-    cols[2].metric("Mean (°C)", summary.get("mean", "—"))
-    cols[3].metric("Max (°C)", summary.get("max", "—"))
+    cols[1].metric(header_min, _fmt(min_val, is_exposure))
+    cols[2].metric(header_mean, _fmt(mean_val, is_exposure))
+    cols[3].metric(header_max, _fmt(max_val, is_exposure))
+
+    unit_note = "per tile, in hours above threshold" if is_exposure else f"per tile, in {temp_unit}"
+    st.caption(f"Min / Average / Max value shown {unit_note}.")
+
     if "median_tile_hours_above_threshold" in summary:
         st.metric(
             "Median hours above threshold (per tile)",
@@ -663,12 +938,23 @@ def render_live_summary(payload: dict):
 
 
 # ----------------------------------------------------------------------
-# DATA RESOLUTION (demo vs cached-live) + ANALYSIS
+# DATA RESOLUTION (demo vs cached-live vs live-fallback) + ANALYSIS
 # ----------------------------------------------------------------------
+# 'active_analytic' drives tile scaling + metric-card units. 'tile_payload'
+# is whatever map_data GeoJSON we overlay on the map (real live tiles when
+# available, otherwise a simulated payload so tiles always render).
+active_analytic = "tcm"
+df = None
+tile_payload = None
+selected_is_live = False
+
 if not live_mode:
+    active_analytic = "tcm"
     df = generate_sample_heatmap(area_name, date)
+    tile_payload = generate_demo_payload(area_name, date, "tcm", threshold_f)
     selected_is_live = False
 else:
+    active_analytic = live_analytic
     cached_payload = load_cached(
         area_name,
         date,
@@ -680,18 +966,37 @@ else:
         st.stop()
 
     live_series = extract_hourly_series(cached_payload)
-    if live_series is None:
-        render_live_summary(cached_payload)
+    live_tiles = (
+        isinstance(cached_payload.get("map_data"), dict)
+        and bool(cached_payload.get("map_data", {}).get("features"))
+    )
+
+    if live_series is not None:
+        df = hourly_df_from_series(live_series)
+        selected_is_live = True
+
+    if live_tiles:
+        tile_payload = cached_payload
+
+    if df is None and tile_payload is None:
+        render_live_summary(cached_payload, active_analytic, temp_unit)
         st.stop()
 
-    df = hourly_df_from_series(live_series)
-    selected_is_live = True
+    if df is None:
+        render_live_summary(cached_payload, active_analytic, temp_unit)
+        df = generate_sample_heatmap(area_name, date)
+        selected_is_live = False
+
+# The per-area summary provenance should reflect whether live data backs it.
+summary_uses_live = bool(live_mode) and selected_is_live
+
+is_exposure_analytic = active_analytic != "tcm"
 
 result = compute_exceedance(df, threshold_f)
 risk_text, risk_color = risk_label(result["exceedance_hours"])
 safe_window = best_time_window(df, result["hot_hours"])
 hot_span = hot_window_range(result["hot_hours"])
-comparison_df = build_area_summaries(date, threshold_f, live_mode)
+comparison_df = build_area_summaries(date, threshold_f, summary_uses_live)
 day_hour_count = len(df)
 
 # ----------------------------------------------------------------------
@@ -772,42 +1077,87 @@ with st.container(border=True):
 peak_temp = float(df["temp_f"].max())
 coolest_row = df.loc[df["temp_f"].idxmin()]
 
-with st.container(horizontal=True):
-    peak_delta_f = peak_temp - threshold_f
-    if temp_unit == "°C":
-        peak_delta_str = f"{peak_delta_f * 5 / 9:+.1f}°C vs threshold"
-    else:
-        peak_delta_str = f"{peak_delta_f:+.0f}°F vs threshold"
-    st.metric(
-        "Peak temperature",
-        fmt_temp(peak_temp, temp_unit),
-        delta=peak_delta_str,
-        delta_color="inverse" if peak_temp > threshold_f else "off",
-        border=True,
-        chart_data=df["temp_f"].tolist(),
-        chart_type="area",
-    )
-    st.metric(
-        "Hours above threshold",
-        f"{result['exceedance_hours']} hrs",
-        delta=f"{day_hour_count} hr window",
-        delta_color="off",
-        border=True,
-    )
-    st.metric(
-        "Longest hot streak",
-        f"{result['longest_streak']} hrs",
-        delta="unbroken" if result["longest_streak"] > 0 else None,
-        delta_color="off",
-        border=True,
-    )
-    st.metric(
-        "Coolest hour",
-        fmt_hour(int(coolest_row["hour"])),
-        delta=fmt_temp(float(coolest_row["temp_f"]), temp_unit),
-        delta_color="off",
-        border=True,
-    )
+if is_exposure_analytic:
+    # Exceedance / persistence analytics return exposure HOURS per tile, not
+    # temperature — so swap the metric cards to exposure-focused headers and
+    # units instead of showing empty temperature dashes.
+    exp_summary = summarize_result(tile_payload, analytic_type=active_analytic) if tile_payload else {}
+    exp_min = exp_summary.get("min")
+    exp_mean = exp_summary.get("mean")
+    exp_max = exp_summary.get("max")
+    exp_count = exp_summary.get("tile_count", "—")
+
+    def _exp_fmt(value, plural) -> str:
+        if value is None:
+            return "—"
+        return f"{value:g} hr{'s' if plural else ''}"
+
+    with st.container(horizontal=True):
+        st.metric(
+            "Min Exposure",
+            _exp_fmt(exp_min, False),
+            delta="per tile below the threshold",
+            delta_color="off",
+            border=True,
+        )
+        st.metric(
+            "Average Exposure",
+            _exp_fmt(exp_mean, True),
+            delta="hours above threshold",
+            delta_color="off",
+            border=True,
+        )
+        st.metric(
+            "Max Exposure",
+            _exp_fmt(exp_max, True),
+            delta="per tile, worst case",
+            delta_color="off",
+            border=True,
+        )
+        st.metric(
+            "Tiles in AOI",
+            f"{exp_count}",
+            delta="grid cells",
+            delta_color="off",
+            border=True,
+        )
+else:
+    with st.container(horizontal=True):
+        peak_delta_f = peak_temp - threshold_f
+        if temp_unit == "°C":
+            peak_delta_str = f"{peak_delta_f * 5 / 9:+.1f}°C vs threshold"
+        else:
+            peak_delta_str = f"{peak_delta_f:+.0f}°F vs threshold"
+        st.metric(
+            "Peak temperature",
+            fmt_temp(peak_temp, temp_unit),
+            delta=peak_delta_str,
+            delta_color="inverse" if peak_temp > threshold_f else "off",
+            border=True,
+            chart_data=df["temp_f"].tolist(),
+            chart_type="area",
+        )
+        st.metric(
+            "Hours above threshold",
+            f"{result['exceedance_hours']} hrs",
+            delta=f"{day_hour_count} hr window",
+            delta_color="off",
+            border=True,
+        )
+        st.metric(
+            "Longest hot streak",
+            f"{result['longest_streak']} hrs",
+            delta="unbroken" if result["longest_streak"] > 0 else None,
+            delta_color="off",
+            border=True,
+        )
+        st.metric(
+            "Coolest hour",
+            fmt_hour(int(coolest_row["hour"])),
+            delta=fmt_temp(float(coolest_row["temp_f"]), temp_unit),
+            delta_color="off",
+            border=True,
+        )
 
 # ----------------------------------------------------------------------
 # UI — MAP + HOURLY CHART (side by side)
@@ -816,12 +1166,35 @@ col_map, col_chart = st.columns([3, 2])
 
 with col_map:
     st.subheader("Heat-risk map")
-    risk_map = build_risk_map(comparison_df, area_name, unit=temp_unit)
+    tile_layer = build_tile_layer(tile_payload, active_analytic) if tile_payload else None
+    risk_map = build_risk_map(
+        comparison_df,
+        area_name,
+        unit=temp_unit,
+        tile_layer=tile_layer,
+        analytic_type=active_analytic,
+    )
     st_folium(risk_map, height=430, use_container_width=True)
+
+    tile_label, tile_colors, _ = tile_value_scale(active_analytic)
+    if tile_layer is not None and len(tile_layer._children) > 0:
+        swatches = "".join(
+            f'<span style="color:{c}">●</span> &nbsp;' for c in tile_colors
+        )
+        st.markdown(
+            f"**{tile_label} (tiles):** {swatches} "
+            f"low&nbsp;→&nbsp;high — colored polygon tiles are the underlying "
+            f"FortyGuard cell data for `{active_analytic}`.",
+            unsafe_allow_html=True,
+        )
+
     st.markdown(
-        ":green[● Low] &nbsp; :yellow[● Moderate] &nbsp; "
-        ":orange[● High] &nbsp; :red[● Extreme] — larger circles = more hours above threshold. "
-        "Click any marker for details."
+        f'<span style="color:{RISK_HEX["green"]}">● Low</span> &nbsp; '
+        f'<span style="color:{RISK_HEX["yellow"]}">● Moderate</span> &nbsp; '
+        f'<span style="color:{RISK_HEX["orange"]}">● High</span> &nbsp; '
+        f'<span style="color:{RISK_HEX["red"]}">● Extreme</span> — '
+        "circles = area risk level (larger = more hours above threshold). Click any marker for details.",
+        unsafe_allow_html=True,
     )
 
 with col_chart:
