@@ -18,6 +18,7 @@ To switch to real data later:
      that saved JSON file instead.
 """
 
+import json
 import random
 import zlib
 from datetime import datetime
@@ -26,13 +27,18 @@ import altair as alt
 import folium
 import pandas as pd
 import streamlit as st
+from folium.plugins import Draw
 from streamlit_folium import st_folium
 
 from fortyguard_client import (
+    drawings_to_polygon_aoi,
     extract_hourly_series,
+    extract_polygon_ring,
     fetch_and_cache_area,
     has_credentials,
     load_cached,
+    point_in_ring,
+    ring_bounds,
     summarize_result,
 )
 
@@ -82,6 +88,36 @@ ACTIVITIES = {
     "Running": ":material/directions_run:",
     "Commuting": ":material/commute:",
     "Outdoor exercise": ":material/fitness_center:",
+}
+
+# Activity heat-tolerance adjustment (°F): how much each activity shifts the
+# effective safe threshold. Negative = stricter (exertion raises heat risk
+# faster), positive = more tolerant. The manual slider still sets the base.
+ACTIVITY_OFFSETS_F = {
+    "Walking": 0.0,
+    "Running": -6.0,
+    "Outdoor exercise": -4.0,
+    "Commuting": 2.0,
+}
+
+# Plain-language justification for each activity's threshold shift.
+ACTIVITY_REASONING = {
+    "Walking": (
+        "Walking is moderate effort, so we kept the base heat threshold with "
+        "no adjustment."
+    ),
+    "Running": (
+        "Running raises your heat exposure faster than walking, so we've set a "
+        "stricter (lower) threshold for your safety."
+    ),
+    "Outdoor exercise": (
+        "Strenuous outdoor exercise raises your heat exposure quickly, so we've "
+        "set a stricter (lower) threshold."
+    ),
+    "Commuting": (
+        "Commuting often includes time in cooled vehicles, so we've allowed a "
+        "slightly more tolerant threshold."
+    ),
 }
 
 SAFE_COLOR = "#16A34A"
@@ -137,19 +173,28 @@ def hourly_df_from_series(series: list[dict]) -> pd.DataFrame:
 
 
 @st.cache_data(ttl="1h", max_entries=64)
-def generate_sample_heatmap(area_name: str, date: str) -> pd.DataFrame:
+def generate_sample_heatmap(
+    area_name: str,
+    date: str,
+    shade_factor: float = None,
+) -> pd.DataFrame:
     """
     Simulates a FortyGuard Heatmap response (analytic_type='tcm' across a day)
     for one area. Shaped like real output: one temperature reading per hour.
 
+    ``shade_factor`` controls how hot the simulated day peaks (shadier areas
+    run cooler). For preset areas it defaults to the preset's value; for custom
+    locations it is supplied by the caller (synthetic default, e.g. 0.3).
+
     Real equivalent: client.create_heatmap(polygon_aoi=..., filter_type=3,
                                             analytic_type='tcm', ...)
     """
-    area = PHOENIX_AREAS[area_name]
+    if shade_factor is None:
+        shade_factor = PHOENIX_AREAS[area_name]["shade_factor"]
     seed = zlib.crc32(f"{area_name}|{date}".encode())  # deterministic per area+date
     rng = random.Random(seed)
 
-    base_peak_f = 108 - (area["shade_factor"] * 20)  # shadier areas run cooler
+    base_peak_f = 108 - (shade_factor * 20)  # shadier areas run cooler
     rows = []
     for hour in HOURS:
         # Simple bell-curve-ish daily temperature pattern peaking ~3-4 PM
@@ -167,6 +212,10 @@ def generate_demo_payload(
     date: str,
     analytic_type: str = "tcm",
     threshold_f: float = 100.0,
+    shade_factor: float = None,
+    lat: float = None,
+    lon: float = None,
+    polygon_aoi: dict = None,
 ) -> dict:
     """
     Builds a small simulated FortyGuard heatmap payload shaped exactly like the
@@ -176,38 +225,82 @@ def generate_demo_payload(
     'persistence' each tile carries an exposure hours value. Used both to render
     demo tile layers and to fall back gracefully when a live fetch fails.
 
-    A real payload equivalent comes from client.create_heatmap(...) with the
-    matching analytic_type.
-    """
-    area = PHOENIX_AREAS[area_name]
-    rng = random.Random(zlib.crc32(f"{area_name}|{date}|{analytic_type}|{threshold_f}".encode()))
+    For preset areas the center + shade come from PHOENIX_AREAS; for custom
+    locations they are passed explicitly (shade_factor defaults to a synthetic
+    0.3 since we have no real shade data for arbitrary points).
 
-    # A small cluster of polygon tiles centered on the area's coordinates.
-    half_lat = 0.012
-    half_lon = 0.014
+    When ``polygon_aoi`` (a user-drawn polygon from the map) is supplied it
+    replaces the auto-generated square: the tile grid is clipped to the shape so
+    the demo AOI mirrors what was drawn on the map.
+
+    A real payload equivalent comes from client.create_heatmap(...) with the
+    matching analytic_type and the drawn polygon as polygon_aoi.
+    """
+    ring = None
+    if polygon_aoi is not None:
+        ring = extract_polygon_ring(polygon_aoi)
+        if ring is not None:
+            min_lon, min_lat, max_lon, max_lat = ring_bounds(ring)
+            lat, lon = (min_lat + max_lat) / 2.0, (min_lon + max_lon) / 2.0
+        else:
+            polygon_aoi = None
+
+    if lat is None or lon is None or shade_factor is None:
+        meta = PHOENIX_AREAS.get(
+            area_name, {"lat": lat, "lon": lon, "shade_factor": 0.3}
+        )
+        lat = lat if lat is not None else meta["lat"]
+        lon = lon if lon is not None else meta["lon"]
+        shade_factor = shade_factor if shade_factor is not None else meta["shade_factor"]
+    area = {"lat": lat, "lon": lon, "shade_factor": shade_factor}
+
+    seed = f"{area_name}|{date}|{analytic_type}|{threshold_f}"
+    if polygon_aoi is not None:
+        seed += "|" + json.dumps(polygon_aoi, sort_keys=True)
+    rng = random.Random(zlib.crc32(seed.encode()))
 
     features = []
     tile_hours: list[float] = []
 
     if analytic_type == "tcm":
         # Distribute temperatures around the demo hourly peak (converted to °C).
-        peak_df = generate_sample_heatmap(area_name, date)
+        peak_df = generate_sample_heatmap(area_name, date, shade_factor)
         peak_c = float((peak_df["temp_f"].max() - 32) * 5 / 9)
-        for i, j in ((0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (1, 2)):
-            temp_c = round(peak_c + rng.uniform(-4.0, 3.0), 2)
-            _add_demo_tile(features, area, i, j, half_lat, half_lon, {"temperature": temp_c})
-            tile_hours.append(temp_c)
+        if ring is not None:
+            for i, j, c_lat, c_lon, half_lat, half_lon in _demo_tiles_in_ring(ring):
+                temp_c = round(peak_c + rng.uniform(-4.0, 3.0), 2)
+                _tile_around(features, c_lat, c_lon, half_lat, half_lon, {"temperature": temp_c})
+                tile_hours.append(temp_c)
+        else:
+            half_lat = 0.012
+            half_lon = 0.014
+            for i, j in ((0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (1, 2)):
+                temp_c = round(peak_c + rng.uniform(-4.0, 3.0), 2)
+                _add_demo_tile(features, area, i, j, half_lat, half_lon, {"temperature": temp_c})
+                tile_hours.append(temp_c)
     else:
         # Exposure hours: hotter tiles get more hours above threshold.
         max_hours = len(HOURS)
-        for i, j in ((0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (1, 2)):
-            hours = round(
-                min(max_hours, max(0.0, rng.uniform(0.5, max_hours - 1.5) +
-                                   (j * 0.8 - 0.8))),
-                1,
-            )
-            _add_demo_tile(features, area, i, j, half_lat, half_lon, {"value": hours})
-            tile_hours.append(hours)
+        if ring is not None:
+            for i, j, c_lat, c_lon, half_lat, half_lon in _demo_tiles_in_ring(ring):
+                hours = round(
+                    min(max_hours, max(0.0, rng.uniform(0.5, max_hours - 1.5) +
+                                       (j * 0.8 - 0.8))),
+                    1,
+                )
+                _tile_around(features, c_lat, c_lon, half_lat, half_lon, {"value": hours})
+                tile_hours.append(hours)
+        else:
+            half_lat = 0.012
+            half_lon = 0.014
+            for i, j in ((0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (1, 2)):
+                hours = round(
+                    min(max_hours, max(0.0, rng.uniform(0.5, max_hours - 1.5) +
+                                       (j * 0.8 - 0.8))),
+                    1,
+                )
+                _add_demo_tile(features, area, i, j, half_lat, half_lon, {"value": hours})
+                tile_hours.append(hours)
 
     map_data = {
         "type": "FeatureCollection",
@@ -243,21 +336,57 @@ def _add_demo_tile(
     half_lon: float,
     properties: dict,
 ) -> None:
-    """Appends one square-ish polygon tile to a features list."""
-    lat0 = area["lat"] + i * half_lat
-    lon0 = area["lon"] + j * half_lon
+    """Appends one square-ish polygon tile to a features list (grid offsets)."""
+    c_lat = area["lat"] + i * half_lat
+    c_lon = area["lon"] + j * half_lon
+    _tile_around(features, c_lat, c_lon, half_lat, half_lon, properties)
+
+
+def _tile_around(
+    features: list,
+    c_lat: float,
+    c_lon: float,
+    half_lat: float,
+    half_lon: float,
+    properties: dict,
+) -> None:
+    """Appends a square polygon tile [[lon, lat], ...] centered on (c_lat, c_lon)."""
     ring = [
-        [lon0, lat0],
-        [lon0 + half_lon, lat0],
-        [lon0 + half_lon, lat0 + half_lat],
-        [lon0, lat0 + half_lat],
-        [lon0, lat0],
+        [c_lon - half_lon, c_lat - half_lat],
+        [c_lon + half_lon, c_lat - half_lat],
+        [c_lon + half_lon, c_lat + half_lat],
+        [c_lon - half_lon, c_lat + half_lat],
+        [c_lon - half_lon, c_lat - half_lat],
     ]
     features.append({
         "type": "Feature",
         "properties": properties,
         "geometry": {"type": "Polygon", "coordinates": [ring]},
     })
+
+
+def _demo_tiles_in_ring(ring):
+    """
+    Returns grid cells (i, j, c_lat, c_lon, half_lat, half_lon) whose centers
+    fall inside ``ring``, covering its bounding box with a 1-6 per side tile
+    grid (finer for larger boxes). Mirrors the shape a polygon AOI clipped to
+    the drawn polygon.
+    """
+    min_lon, min_lat, max_lon, max_lat = ring_bounds(ring)
+    span_lon = max(max_lon - min_lon, 1e-6)
+    span_lat = max(max_lat - min_lat, 1e-6)
+    cols = max(1, min(6, int(round(span_lon / 0.004))))
+    rows = max(1, min(6, int(round(span_lat / 0.004))))
+    cell_lat = span_lat / rows
+    cell_lon = span_lon / cols
+    cells = []
+    for i in range(rows):
+        c_lat = min_lat + (i + 0.5) * cell_lat
+        for j in range(cols):
+            c_lon = min_lon + (j + 0.5) * cell_lon
+            if point_in_ring(c_lon, c_lat, ring):
+                cells.append((i, j, c_lat, c_lon, cell_lat / 2, cell_lon / 2))
+    return cells
 
 
 @st.cache_data(ttl="1h", max_entries=256)
@@ -348,7 +477,9 @@ def build_nl_summary(
     Composes a short plain-English recommendation from the analysis results.
     Purely rule-based — no external service, works offline, zero cost.
     """
+    activity_name = activity
     activity = activity.lower()
+    reasoning = " " + ACTIVITY_REASONING.get(activity_name, "")
     exceedance = result["exceedance_hours"]
     peak_row = df.loc[df["temp_f"].idxmax()]
     peak_temp = float(peak_row["temp_f"])
@@ -368,7 +499,7 @@ def build_nl_summary(
         return (
             f"It's a clear day in {area_name}: temperatures stay below "
             f"{fmt_temp(threshold_f, unit)} from open to close, so {activity} is comfortable "
-            f"whenever it suits you. The most pleasant stretch sits around "
+            f"whenever it suits you.{reasoning} The most pleasant stretch sits around "
             f"{fmt_hour(int(coolest_row['hour']))} at roughly "
             f"{fmt_temp(float(coolest_row['temp_f']), unit)}."
         )
@@ -384,7 +515,8 @@ def build_nl_summary(
         start_h, end_h = safe_window
         return (
             f"For {activity} in {area_name}, aim for {fmt_hour(start_h)} – "
-            f"{fmt_hour(end_h)}, when conditions hold under {fmt_temp(threshold_f, unit)}. "
+            f"{fmt_hour(end_h)}, when conditions hold under {fmt_temp(threshold_f, unit)}."
+            f"{reasoning} "
             f"From {fmt_hour(hot_window_range(result['hot_hours'])[0])} onward, "
             f"expect {exceedance} hr{'s' if exceedance != 1 else ''} above "
             f"{fmt_temp(threshold_f, unit)}, peaking near {fmt_temp(peak_temp, unit)} around "
@@ -394,7 +526,7 @@ def build_nl_summary(
     return (
         f"There's no fully safe window for {activity} in {area_name} today — "
         f"{exceedance} tracked hours run above {fmt_temp(threshold_f, unit)}, topping out "
-        f"near {fmt_temp(peak_temp, unit)} around {peak_time}.{streak_note} Move it to "
+        f"near {fmt_temp(peak_temp, unit)} around {peak_time}.{reasoning} Move it to "
         f"early morning, shift it indoors, or pick a cooler area.{alt_clause}"
     )
 
@@ -603,16 +735,26 @@ def build_risk_map(
     unit: str = "°F",
     tile_layer: folium.FeatureGroup = None,
     analytic_type: str = "tcm",
+    draw_control: bool = True,
 ) -> folium.Map:
     """
     Interactive Phoenix map (OpenStreetMap tiles) with one risk-colored marker
     per area. When a tile_layer (GeoJSON tiles from map_data) is provided it is
     drawn beneath the markers so judges can see the underlying FortyGuard tiles.
     The selected area gets a highlight ring.
+
+    ``draw_control`` adds a polygon-only Leaflet.Draw toolbar so users can draw
+    a custom AOI polygon directly on the map (captured via st_folium's returned
+    map data).
     """
+    if len(comparison_df) == 1 and pd.notna(comparison_df.iloc[0].get("_lat")):
+        center = [float(comparison_df.iloc[0]["_lat"]), float(comparison_df.iloc[0]["_lon"])]
+    else:
+        center = [PHOENIX_CENTER["lat"], PHOENIX_CENTER["lon"]]
+
     m = folium.Map(
-        location=[PHOENIX_CENTER["lat"], PHOENIX_CENTER["lon"]],
-        zoom_start=10,
+        location=center,
+        zoom_start=12,
         tiles="OpenStreetMap",
         control_scale=True,
     )
@@ -623,8 +765,11 @@ def build_risk_map(
     points = []
     for _, row in comparison_df.iterrows():
         name = row["Area"]
-        area_meta = PHOENIX_AREAS[name]
-        lat, lon = area_meta["lat"], area_meta["lon"]
+        if pd.notna(row.get("_lat")) and pd.notna(row.get("_lon")):
+            lat, lon = float(row["_lat"]), float(row["_lon"])
+        else:
+            area_meta = PHOENIX_AREAS[name]
+            lat, lon = area_meta["lat"], area_meta["lon"]
         points.append((lat, lon))
 
         hex_color = RISK_HEX.get(row["_color"], "#71717A")
@@ -670,6 +815,22 @@ def build_risk_map(
 
     if points:
         m.fit_bounds(points, padding=(24, 24))
+
+    if draw_control:
+        Draw(
+            export=False,
+            position="topleft",
+            show_geometry_on_click=False,
+            draw_options={
+                "polyline": False,
+                "rectangle": False,
+                "circle": False,
+                "marker": False,
+                "circlemarker": False,
+                "polygon": True,
+            },
+            edit_options={"edit": True, "remove": True},
+        ).add_to(m)
 
     return m
 
@@ -738,7 +899,71 @@ def daily_temperature_chart(df: pd.DataFrame, result: dict, threshold_f: float, 
 with st.sidebar:
     st.header("Plan your outing")
 
-    area_name = st.selectbox("Area in Phoenix, AZ", list(PHOENIX_AREAS.keys()))
+    loc_source = st.radio(
+        "Location",
+        options=["Preset area", "Custom location"],
+        horizontal=True,
+        index=0,
+    )
+
+    if loc_source == "Custom location":
+        is_custom = True
+        c_type = st.radio(
+            "Specify custom location by",
+            options=["Place name or address", "Coordinates"],
+            horizontal=True,
+            key="custom_loc_type",
+        )
+        if c_type == "Coordinates":
+            c_lat = st.number_input(
+                "Latitude",
+                value=33.4484,
+                min_value=-90.0,
+                max_value=90.0,
+                step=0.0001,
+                format="%.5f",
+            )
+            c_lon = st.number_input(
+                "Longitude",
+                value=-112.0740,
+                min_value=-180.0,
+                max_value=180.0,
+                step=0.0001,
+                format="%.5f",
+            )
+            area_name = f"Custom ({c_lat:.5f}, {c_lon:.5f})"
+        else:
+            c_lat = st.number_input(
+                "Latitude",
+                value=33.4484,
+                min_value=-90.0,
+                max_value=90.0,
+                step=0.0001,
+                format="%.5f",
+            )
+            c_lon = st.number_input(
+                "Longitude",
+                value=-112.0740,
+                min_value=-180.0,
+                max_value=180.0,
+                step=0.0001,
+                format="%.5f",
+            )
+            c_label = st.text_input(
+                "Place name or address",
+                value="My custom location",
+                help=(
+                    "Used as the label only — coordinates above define the "
+                    "location (no offline address geocoding)."
+                ),
+            ).strip()
+            area_name = c_label or f"Custom ({c_lat:.5f}, {c_lon:.5f})"
+        # No real shade data for arbitrary points — use a synthetic default.
+        area_meta = {"lat": c_lat, "lon": c_lon, "shade_factor": 0.3}
+    else:
+        is_custom = False
+        area_name = st.selectbox("Area in Phoenix, AZ", list(PHOENIX_AREAS.keys()))
+        area_meta = PHOENIX_AREAS[area_name]
 
     date = st.date_input("Date", value=datetime(2026, 7, 15)).isoformat()
 
@@ -774,7 +999,7 @@ with st.sidebar:
         value=slider_val,
         step=slider_step,
         format="%.1f" if temp_unit == "°C" else "%d",
-        help="Hours above this temperature count as risky exposure.",
+        help="Base temperature for risky exposure. The selected activity shifts this up or down automatically (e.g. Running tightens it).",
     )
 
     if temp_unit == "°C":
@@ -782,6 +1007,11 @@ with st.sidebar:
     else:
         st.session_state.threshold_f = float(threshold_f)
     threshold_f = st.session_state.threshold_f
+
+    # Activity shifts the base slider threshold: exertion (Running / Outdoor
+    # exercise) tightens it, commuting loosens it, walking keeps it as-is.
+    activity_offset_f = ACTIVITY_OFFSETS_F[activity]
+    effective_threshold_f = threshold_f + activity_offset_f
 
     data_source_label = st.segmented_control(
         "Data source",
@@ -825,13 +1055,16 @@ with st.sidebar:
 # LIVE FETCH PANEL (the ONLY place a live API call can ever start)
 # ----------------------------------------------------------------------
 
-def render_fetch_panel(area_name: str, date: str, analytic_type: str, threshold_f: float):
-    """Shown in live mode when no cached file exists yet for this area/date."""
-    area_meta = PHOENIX_AREAS[area_name]
-
+def render_fetch_panel(area_name: str, date: str, analytic_type: str, threshold_f: float, area_meta: dict, polygon_aoi: dict = None):
+    """Shown in live mode when no cached file exists yet for this location/date."""
+    aoi_note = ""
+    if polygon_aoi is not None:
+        aoi_note = (
+            " · AOI is the **polygon you drew on the map** (replaces the auto square)"
+        )
     st.warning(
         f"No cached FortyGuard data for **{area_name}** on **{date}** "
-        f"(analytic: `{analytic_type}`). Nothing has been fetched — your credits are safe.",
+        f"(analytic: `{analytic_type}`).{aoi_note} Nothing has been fetched — your credits are safe.",
         icon=":material/cloud_off:",
     )
 
@@ -869,6 +1102,7 @@ def render_fetch_panel(area_name: str, date: str, analytic_type: str, threshold_
                         date=date,
                         analytic_type=analytic_type,
                         threshold_f=threshold_f if analytic_type != "tcm" else None,
+                        polygon_aoi=polygon_aoi,
                         progress_callback=lambda msg: st.write(msg),
                     )
                     status.update(
@@ -960,10 +1194,16 @@ df = None
 tile_payload = None
 selected_is_live = False
 
+drawn_polygon_aoi = st.session_state.get("drawn_polygon_aoi") or None
+
 if not live_mode:
     active_analytic = "tcm"
-    df = generate_sample_heatmap(area_name, date)
-    tile_payload = generate_demo_payload(area_name, date, "tcm", threshold_f)
+    df = generate_sample_heatmap(area_name, date, area_meta["shade_factor"])
+    tile_payload = generate_demo_payload(
+        area_name, date, "tcm", threshold_f,
+        area_meta["shade_factor"], area_meta["lat"], area_meta["lon"],
+        polygon_aoi=drawn_polygon_aoi,
+    )
     selected_is_live = False
 else:
     active_analytic = live_analytic
@@ -972,9 +1212,13 @@ else:
         date,
         live_analytic,
         threshold_f if live_analytic != "tcm" else None,
+        polygon_aoi=drawn_polygon_aoi,
     )
     if cached_payload is None:
-        render_fetch_panel(area_name, date, live_analytic, threshold_f)
+        render_fetch_panel(
+            area_name, date, live_analytic, threshold_f, area_meta,
+            polygon_aoi=drawn_polygon_aoi,
+        )
         st.stop()
 
     live_series = extract_hourly_series(cached_payload)
@@ -996,7 +1240,7 @@ else:
 
     if df is None:
         render_live_summary(cached_payload, active_analytic, temp_unit)
-        df = generate_sample_heatmap(area_name, date)
+        df = generate_sample_heatmap(area_name, date, area_meta["shade_factor"])
         selected_is_live = False
 
 # The per-area summary provenance should reflect whether live data backs it.
@@ -1004,19 +1248,41 @@ summary_uses_live = bool(live_mode) and selected_is_live
 
 is_exposure_analytic = active_analytic != "tcm"
 
-result = compute_exceedance(df, threshold_f)
+result = compute_exceedance(df, effective_threshold_f)
 risk_text, risk_color = risk_label(result["exceedance_hours"])
 safe_window = best_time_window(df, result["hot_hours"])
 hot_span = hot_window_range(result["hot_hours"])
-comparison_df = build_area_summaries(date, threshold_f, summary_uses_live)
+if is_custom:
+    # No area-comparison table for a custom location — build a single-row
+    # frame so the map still draws a marker at the custom point.
+    window_text = (
+        f"{fmt_hour(safe_window[0])} – {fmt_hour(safe_window[1])}"
+        if safe_window else "None"
+    )
+    comparison_df = pd.DataFrame([{
+        "Area": area_name,
+        "Data": "live" if selected_is_live else ("demo*" if live_mode else "demo"),
+        "Risk level": risk_text,
+        "_color": risk_color,
+        "Hours above threshold": result["exceedance_hours"],
+        "Longest hot streak": result["longest_streak"],
+        "Peak temp (°F)": float(df["temp_f"].max()),
+        "Best window": window_text,
+        "_lat": float(area_meta["lat"]),
+        "_lon": float(area_meta["lon"]),
+    }])
+else:
+    comparison_df = build_area_summaries(date, effective_threshold_f, summary_uses_live)
 day_hour_count = len(df)
 
 # ----------------------------------------------------------------------
 # UI — HEADER / BRANDING
 # ----------------------------------------------------------------------
+st.image("assets/cover_banner.svg", use_container_width=True)
 header_left, header_right = st.columns([3, 1], vertical_alignment="center")
 with header_left:
     st.title(":material/thermostat: Smart Commute & Outdoor Activity Advisor")
+    st.caption("Know exactly when it's safe to step outside — before the heat does.")
     st.caption("Hyperlocal heat-exposure guidance for walking, running, and commuting · Powered by FortyGuard Temperature Intelligence")
 with header_right:
     with st.container(horizontal=True, horizontal_alignment="right"):
@@ -1026,7 +1292,10 @@ with header_right:
             st.badge("Live fallback", icon=":material/science:", color="orange")
         else:
             st.badge("Demo data", icon=":material/science:", color="gray")
-        st.badge("Phoenix, AZ", icon=":material/location_on:", color="orange")
+        if is_custom:
+            st.badge("Custom location", icon=":material/pin_drop:", color="blue")
+        else:
+            st.badge("Phoenix, AZ", icon=":material/location_on:", color="orange")
 
 # ----------------------------------------------------------------------
 # UI — HERO RECOMMENDATION CARD
@@ -1053,7 +1322,7 @@ with st.container(border=True):
             hot_start, hot_end = hot_span
             st.markdown(f"## :red[{fmt_hour(hot_start)} – {fmt_hour(hot_end)}]")
             st.caption(
-                f":material/local_fire_department: Avoid — {len(result['hot_hours'])} hrs above {fmt_temp(threshold_f, temp_unit)}"
+                f":material/local_fire_department: Avoid — {len(result['hot_hours'])} hrs above {fmt_temp(effective_threshold_f, temp_unit)}"
             )
         else:
             st.markdown(f"## :green[All day]")
@@ -1061,14 +1330,14 @@ with st.container(border=True):
 
 if result["exceedance_hours"] > 0:
     st.warning(
-        f"Heat advisory for **{area_name}**: temperatures exceed **{fmt_temp(threshold_f, temp_unit)}** between "
+        f"Heat advisory for **{area_name}**: temperatures exceed **{fmt_temp(effective_threshold_f, temp_unit)}** between "
         f"**{fmt_hour(hot_span[0])}** and **{fmt_hour(hot_span[1])}**. Shift your "
         f"{activity.lower()} earlier or later, or pick a shadier area below.",
         icon=":material/warning:",
     )
 else:
     st.success(
-        f"{area_name} stays below **{fmt_temp(threshold_f, temp_unit)}** all day — any time works for your {activity.lower()}.",
+        f"{area_name} stays below **{fmt_temp(effective_threshold_f, temp_unit)}** all day — any time works for your {activity.lower()}.",
         icon=":material/check_circle:",
     )
 
@@ -1076,11 +1345,10 @@ else:
 # UI — NATURAL-LANGUAGE SUMMARY (rule-based, offline, zero cost)
 # ----------------------------------------------------------------------
 nl_summary = build_nl_summary(
-    area_name, activity, threshold_f, result, df, safe_window, comparison_df,
+    area_name, activity, effective_threshold_f, result, df, safe_window, comparison_df,
     unit=temp_unit,
 )
 with st.container(border=True):
-    st.markdown("**:material/quick_reference_all: In plain english**")
     st.write(nl_summary)
 
 # ----------------------------------------------------------------------
@@ -1135,7 +1403,7 @@ if is_exposure_analytic:
         )
 else:
     with st.container(horizontal=True):
-        peak_delta_f = peak_temp - threshold_f
+        peak_delta_f = peak_temp - effective_threshold_f
         if temp_unit == "°C":
             peak_delta_str = f"{peak_delta_f * 5 / 9:+.1f}°C vs threshold"
         else:
@@ -1144,7 +1412,7 @@ else:
             "Peak temperature",
             fmt_temp(peak_temp, temp_unit),
             delta=peak_delta_str,
-            delta_color="inverse" if peak_temp > threshold_f else "off",
+            delta_color="inverse" if peak_temp > effective_threshold_f else "off",
             border=True,
             chart_data=df["temp_f"].tolist(),
             chart_type="area",
@@ -1183,10 +1451,29 @@ with col_map:
         comparison_df,
         area_name,
         unit=temp_unit,
-        tile_layer=tile_layer,
+        tile_layer=None,
         analytic_type=active_analytic,
     )
-    st_folium(risk_map, height=430, use_container_width=True)
+    map_result = st_folium(
+        risk_map,
+        height=430,
+        use_container_width=True,
+        returned_objects=["all_drawings", "last_active_drawing"],
+        feature_group_to_add=[tile_layer] if tile_layer is not None else None,
+    )
+
+    current_drawn = drawings_to_polygon_aoi(
+        map_result.get("all_drawings") if map_result else None
+    )
+    if current_drawn != st.session_state.get("drawn_polygon_aoi"):
+        st.session_state["drawn_polygon_aoi"] = current_drawn
+        st.rerun()
+    if current_drawn is not None:
+        st.caption(
+            ":material/draw: **Custom polygon AOI active** — demo tiles are clipped "
+            "to your drawing. Use the toolbar's trash icon to clear it and fall back "
+            "to the auto square."
+        )
 
     tile_label, tile_colors, _ = tile_value_scale(active_analytic)
     if tile_layer is not None and len(tile_layer._children) > 0:
@@ -1215,14 +1502,20 @@ with col_map:
 
 with col_chart:
     st.subheader(f"Hourly heat curve — {date}")
-    daily_temperature_chart(df, result, threshold_f, temp_unit)
-    st.caption(f"Dashed line marks your {fmt_temp(threshold_f, temp_unit)} threshold. Red bars are hours of risky exposure.")
+    daily_temperature_chart(df, result, effective_threshold_f, temp_unit)
+    st.caption(f"Dashed line marks your {fmt_temp(effective_threshold_f, temp_unit)} activity-adjusted threshold. Red bars are hours of risky exposure.")
 
 # ----------------------------------------------------------------------
 # UI — COMPARE ALL AREAS
 # ----------------------------------------------------------------------
 st.subheader("Compare all Phoenix areas")
-if live_mode and (comparison_df["Data"] == "demo*").any():
+if is_custom:
+    st.info(
+        "Area comparison is only shown for the preset Phoenix areas — pick "
+        "**Preset area** in the sidebar to compare locations side by side.",
+        icon=":material/compare_arrows:",
+    )
+elif live_mode and (comparison_df["Data"] == "demo*").any():
     st.caption(
         "Sorted by safest first. Areas marked **demo*** have no cached live data yet "
         "for this date — switch to them in the sidebar and click *Fetch live data*. "
@@ -1231,27 +1524,28 @@ if live_mode and (comparison_df["Data"] == "demo*").any():
 else:
     st.caption("Sorted by safest first — fewer hours above your threshold means a cooler, safer area.")
 
-st.dataframe(
-    comparison_df.assign(**{
-        f"Peak temp ({temp_unit})": comparison_df["Peak temp (°F)"].apply(
-            lambda t: f_to_c(t) if temp_unit == "°C" else t
-        ),
-    }),
-    column_config={
-        "_color": None,
-        "Peak temp (°F)": None if temp_unit == "°C" else st.column_config.NumberColumn(format="%.1f °F"),
-        f"Peak temp ({temp_unit})": st.column_config.NumberColumn(format="%.1f" + f" {temp_unit}"),
-        "Risk level": st.column_config.TextColumn(width="medium"),
-        "Hours above threshold": st.column_config.ProgressColumn(
-            min_value=0,
-            max_value=max(1, int(comparison_df["Hours above threshold"].max())),
-            format="%d hrs",
-        ),
-        "Longest hot streak": st.column_config.NumberColumn(format="%d hrs"),
-        "Best window": st.column_config.TextColumn(width="medium"),
-    },
-    hide_index=True,
-)
+if not is_custom:
+    st.dataframe(
+        comparison_df.assign(**{
+            f"Peak temp ({temp_unit})": comparison_df["Peak temp (°F)"].apply(
+                lambda t: f_to_c(t) if temp_unit == "°C" else t
+            ),
+        }),
+        column_config={
+            "_color": None,
+            "Peak temp (°F)": None if temp_unit == "°C" else st.column_config.NumberColumn(format="%.1f °F"),
+            f"Peak temp ({temp_unit})": st.column_config.NumberColumn(format="%.1f" + f" {temp_unit}"),
+            "Risk level": st.column_config.TextColumn(width="medium"),
+            "Hours above threshold": st.column_config.ProgressColumn(
+                min_value=0,
+                max_value=max(1, int(comparison_df["Hours above threshold"].max())),
+                format="%d hrs",
+            ),
+            "Longest hot streak": st.column_config.NumberColumn(format="%d hrs"),
+            "Best window": st.column_config.TextColumn(width="medium"),
+        },
+        hide_index=True,
+    )
 
 # ----------------------------------------------------------------------
 # UI — FOOTER

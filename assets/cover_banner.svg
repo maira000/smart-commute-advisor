@@ -1,0 +1,51 @@
+<svg width="680" height="280" viewBox="0 0 680 280" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Smart Commute and Outdoor Activity Advisor cover banner</title>
+<desc>A stylized desert sunset scene over a Phoenix skyline with saguaro cacti and heat shimmer, with the project title and tagline overlaid.</desc>
+<defs>
+<linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0%" stop-color="#7C2D12"/>
+<stop offset="35%" stop-color="#EA580C"/>
+<stop offset="65%" stop-color="#F59E0B"/>
+<stop offset="100%" stop-color="#FDE68A"/>
+</linearGradient>
+<linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0%" stop-color="#9A3412"/>
+<stop offset="100%" stop-color="#7C2D12"/>
+</linearGradient>
+</defs>
+<rect x="0" y="0" width="680" height="280" fill="url(#sky)"/>
+<circle cx="500" cy="95" r="52" fill="#FEF3C7"/>
+<g stroke="#FFFFFF" stroke-opacity="0.35" stroke-width="2" fill="none">
+<path d="M40 205 Q 60 198 80 205 T 120 205"/>
+<path d="M150 215 Q 170 208 190 215 T 230 215"/>
+<path d="M260 200 Q 280 193 300 200 T 340 200"/>
+</g>
+<g fill="#78350F">
+<rect x="380" y="150" width="18" height="60" rx="1"/>
+<rect x="402" y="130" width="16" height="80" rx="1"/>
+<rect x="422" y="160" width="14" height="50" rx="1"/>
+<rect x="440" y="115" width="20" height="95" rx="1"/>
+<rect x="464" y="145" width="15" height="65" rx="1"/>
+<rect x="482" y="100" width="18" height="110" rx="1"/>
+<rect x="504" y="140" width="14" height="70" rx="1"/>
+<rect x="522" y="120" width="16" height="90" rx="1"/>
+<rect x="542" y="155" width="15" height="55" rx="1"/>
+</g>
+<g fill="#451A03">
+<rect x="70" y="150" width="14" height="60" rx="7"/>
+<rect x="58" y="165" width="10" height="14" rx="5"/>
+<rect x="86" y="158" width="10" height="14" rx="5"/>
+<rect x="180" y="140" width="16" height="70" rx="8"/>
+<rect x="166" y="158" width="10" height="16" rx="5"/>
+<rect x="200" y="150" width="10" height="16" rx="5"/>
+</g>
+<g fill="#3E1A05">
+<circle cx="245" cy="195" r="5"/>
+<rect x="242" y="200" width="6" height="10"/>
+<path d="M245 200 L235 190 M245 197 L253 189 M245 205 L238 215 M245 205 L252 215" stroke="#3E1A05" stroke-width="3" stroke-linecap="round"/>
+</g>
+<rect x="0" y="210" width="680" height="70" fill="url(#ground)"/>
+<rect x="0" y="220" width="680" height="60" fill="#1C0A02" opacity="0.55"/>
+<text x="40" y="244" font-size="26" font-weight="500" fill="#FFF7ED" font-family="sans-serif">Smart commute &amp; outdoor activity advisor</text>
+<text x="40" y="266" font-size="14" font-weight="400" fill="#FDE9D0" font-family="sans-serif">Know before you go — heat-smart routes and timing for Phoenix, AZ</text>
+</svg>

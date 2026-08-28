@@ -33,6 +33,7 @@ import math
 import os
 import re
 import time
+import zlib
 from pathlib import Path
 from typing import Any, Optional
 
@@ -116,6 +117,74 @@ def square_polygon_geojson(lat: float, lon: float, side_km: float = 1.5) -> dict
     }
 
 
+def extract_polygon_ring(polygon_aoi: dict) -> Optional[list]:
+    """
+    Returns the exterior ring [[lon, lat], ...] of the first Polygon feature in
+    a polygon_aoi FeatureCollection (GeoJSON coordinate order). Returns None
+    when the payload holds no usable polygon.
+    """
+    if not isinstance(polygon_aoi, dict):
+        return None
+    for feature in polygon_aoi.get("features") or []:
+        geometry = (feature or {}).get("geometry") or {}
+        if geometry.get("type") != "Polygon":
+            continue
+        coords = geometry.get("coordinates")
+        if coords and coords[0] and len(coords[0]) >= 4:
+            return coords[0]
+    return None
+
+
+def ring_bounds(ring) -> tuple:
+    """Returns (min_lon, min_lat, max_lon, max_lat) of a [[lon, lat], ...] ring."""
+    lons = [p[0] for p in ring]
+    lats = [p[1] for p in ring]
+    return min(lons), min(lats), max(lons), max(lats)
+
+
+def point_in_ring(lon: float, lat: float, ring) -> bool:
+    """Ray-casting point-in-polygon test for a [[lon, lat], ...] ring."""
+    inside = False
+    n = len(ring)
+    for i in range(n):
+        x1, y1 = ring[i]
+        x2, y2 = ring[(i + 1) % n]
+        if (y1 > lat) != (y2 > lat):
+            x_cross = (x2 - x1) * (lat - y1) / ((y2 - y1) or 1e-12) + x1
+            if lon < x_cross:
+                inside = not inside
+    return inside
+
+
+def drawings_to_polygon_aoi(drawings) -> Optional[dict]:
+    """
+    Converts st_folium's returned 'all_drawings' (list of drawn GeoJSON
+    features) into a polygon_aoi FeatureCollection suitable for
+    create_heatmap() / generate_demo_payload(). Returns None when no polygon
+    has been drawn, so callers keep the square-AOI fallback untouched.
+    """
+    features = []
+    for drawing in drawings or []:
+        if not isinstance(drawing, dict):
+            continue
+        geometry = drawing.get("geometry") or {}
+        if geometry.get("type") != "Polygon":
+            continue
+        coords = geometry.get("coordinates")
+        if not coords or not coords[0] or len(coords[0]) < 4:
+            continue
+        features.append({"type": "Feature", "properties": {}, "geometry": geometry})
+    if not features:
+        return None
+    return {"type": "FeatureCollection", "features": features}
+
+
+def _polygon_signature(polygon_aoi: dict) -> str:
+    """Short stable fingerprint for a polygon_aoi (used in cache filenames)."""
+    serialized = json.dumps(polygon_aoi, sort_keys=True, separators=(",", ":"))
+    return zlib.crc32(serialized.encode()).to_bytes(4, "big").hex()
+
+
 def build_heatmap_payload(
     polygon_aoi: dict,
     date: str,
@@ -160,9 +229,12 @@ def cache_path(
     date: str,
     analytic_type: str = "tcm",
     threshold_f: Optional[float] = None,
+    polygon_aoi: Optional[dict] = None,
 ) -> Path:
-    """data/<area>_<date>_<analytic>[_thrNNNF].json"""
+    """data/<area>_<date>_<analytic>[_poly<sig>][_thrNNNF].json"""
     parts = [_safe_name(area_name), date, _safe_name(analytic_type)]
+    if polygon_aoi is not None:
+        parts.append(f"poly_{_polygon_signature(polygon_aoi)}")
     if analytic_type in ("exceedance", "persistence") and threshold_f is not None:
         parts.append(f"thr{int(round(threshold_f))}F")
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -174,8 +246,9 @@ def load_cached(
     date: str,
     analytic_type: str = "tcm",
     threshold_f: Optional[float] = None,
+    polygon_aoi: Optional[dict] = None,
 ) -> Optional[dict]:
-    path = cache_path(area_name, date, analytic_type, threshold_f)
+    path = cache_path(area_name, date, analytic_type, threshold_f, polygon_aoi)
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -190,8 +263,9 @@ def save_cache(
     date: str,
     analytic_type: str = "tcm",
     threshold_f: Optional[float] = None,
+    polygon_aoi: Optional[dict] = None,
 ) -> Path:
-    path = cache_path(area_name, date, analytic_type, threshold_f)
+    path = cache_path(area_name, date, analytic_type, threshold_f, polygon_aoi)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
 
@@ -447,19 +521,24 @@ def fetch_and_cache_area(
     analytic_type: str = "tcm",
     threshold_f: Optional[float] = None,
     side_km: float = 1.5,
+    polygon_aoi: Optional[dict] = None,
     progress_callback=None,
 ) -> tuple[dict, bool]:
     """
     Cache-first orchestration used by the app's manual fetch button.
 
+    ``polygon_aoi`` lets a user-drawn polygon replace the auto-generated square
+    (``square_polygon_geojson``). The cache filename incorporates the polygon
+    fingerprint so different AOIs never share a cache file.
+
     Returns (payload, from_cache). Never performs a live call unless the
     cache file is missing.
     """
-    cached = load_cached(area_name, date, analytic_type, threshold_f)
+    cached = load_cached(area_name, date, analytic_type, threshold_f, polygon_aoi)
     if cached is not None:
         return cached, True
 
-    polygon = square_polygon_geojson(lat, lon, side_km=side_km)
+    polygon = polygon_aoi or square_polygon_geojson(lat, lon, side_km=side_km)
     result = create_heatmap(
         polygon_aoi=polygon,
         date=date,
@@ -467,5 +546,5 @@ def fetch_and_cache_area(
         threshold_f=threshold_f,
         progress_callback=progress_callback,
     )
-    save_cache(result, area_name, date, analytic_type, threshold_f)
+    save_cache(result, area_name, date, analytic_type, threshold_f, polygon_aoi)
     return result, False

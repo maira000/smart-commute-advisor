@@ -1,3 +1,5 @@
+![Smart Commute & Outdoor Activity Advisor](assets/cover_banner.svg)
+
 # Smart Commute & Outdoor Activity Advisor
 
 A Streamlit app that recommends the safest time to walk, run, or commute in Phoenix, AZ based on heat exposure — built for FortyGuard Hackathon '26.
@@ -10,6 +12,35 @@ streamlit run app.py
 ```
 
 It'll open automatically in your browser at `http://localhost:8501`.
+
+## Testing
+
+The app includes a headless UI test suite built on Streamlit's AppTest
+framework — no browser, no network, no API credits required.
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/
+```
+
+The suite drives the real `app.py` script and verifies it renders with **zero
+exceptions** across these scenarios:
+
+1. The app loads with default state (demo mode, `Downtown Phoenix`, °F) and
+   raises no exceptions.
+2. Toggling the temperature unit between °F and °C doesn't break rendering.
+3. Switching between all six sample Phoenix areas works without exceptions.
+4. Analytic types render correctly — `tcm`/`exceedance`/`persistence` demo
+   payloads build renderable tile layers, and switching the analytic type in
+   live mode swaps the metric cards to the right units (temperature vs.
+   exposure hours).
+5. Toggling the **Data source** to *FortyGuard live* with no API key
+   configured shows a graceful error (instead of crashing).
+6. A simulated API failure (`requests.post` raising a connection error or
+   returning HTTP 429) falls back gracefully to cached/demo data without
+   raising, and cached results are preferred over any network call.
+
+Verified: `17 passed` with zero exceptions across all scenarios.
 
 ## Data Sources
 
@@ -30,6 +61,13 @@ Switch the toggle to *FortyGuard live*. Nothing is fetched automatically:
    area/date/analytic, saved to `data/` and reused forever after)
 3. Streamlit reruns the whole script on every UI interaction, which is why the
    file-based cache exists — reruns never trigger live calls
+
+The `data/*.json` cache files themselves are **gitignored**, so they don't
+appear in this repo — each one is user/machine-specific (area, date, analytic,
+your threshold) and re-fetchable. The caching **logic** in
+`fortyguard_client.py` (`cache_path` / `load_cached` / `save_cache`) is fully
+committed and working, so the app still caches live responses locally; only the
+generated files are left out of Git.
 
 **Setup:** copy `.env.example` to `.env` and set `FORTYGUARD_API_KEY` (never
 hardcode keys or commit `.env`).
@@ -56,6 +94,9 @@ smart_commute_advisor/
 ├── app.py                  # Main Streamlit app
 ├── fortyguard_client.py    # Real API wrapper (submit → poll → cache)
 ├── requirements.txt        # Python dependencies
+├── requirements-dev.txt    # Test dependencies (pytest + streamlit)
+├── pytest.ini              # Pytest config
+├── tests/                  # Headless AppTest suite (pytest tests/)
 ├── .env.example            # Template for FORTYGUARD_API_KEY
 ├── .streamlit/config.toml  # Theme (heat-safety palette)
 └── data/                   # Cached live API responses (gitignored)

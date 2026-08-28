@@ -1,0 +1,6 @@
+# Development / testing dependencies — install with:
+#   pip install -r requirements-dev.txt
+-r requirements.txt
+
+pytest>=7.0
+streamlit>=1.35.0
