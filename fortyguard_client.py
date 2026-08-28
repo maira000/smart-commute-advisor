@@ -392,7 +392,7 @@ def extract_hourly_series(result: dict) -> Optional[list[dict]]:
     return None
 
 
-def summarize_result(result: dict) -> dict:
+def summarize_result(result: dict, analytic_type: str = "tcm") -> dict:
     """Pulls human-readable aggregate stats out of stats_data, tolerantly."""
     stats = result.get("stats_data") or {}
     temp_stats = stats.get("Temperature_stats") or stats.get("temperature_stats") or {}
@@ -413,10 +413,21 @@ def summarize_result(result: dict) -> dict:
         "tile_count": len(features),
     }
     if temp_stats:
-        summary["min"] = temp_stats.get("Minimum")
-        summary["max"] = temp_stats.get("Maximum")
-        summary["mean"] = temp_stats.get("Mean")
-        summary["std_dev"] = temp_stats.get("Standard_deviation")
+        def _case_insensitive_get(mapping: dict, *names) -> Any:
+            for n in names:
+                if n in mapping and mapping[n] is not None:
+                    return mapping[n]
+            lowered = {str(k).lower(): v for k, v in mapping.items()}
+            for n in names:
+                v = lowered.get(n.lower())
+                if v is not None:
+                    return v
+            return None
+
+        summary["min"] = _case_insensitive_get(temp_stats, "Minimum", "minimum", "min")
+        summary["max"] = _case_insensitive_get(temp_stats, "Maximum", "maximum", "max")
+        summary["mean"] = _case_insensitive_get(temp_stats, "Mean", "mean", "average")
+        summary["std_dev"] = _case_insensitive_get(temp_stats, "Standard_deviation", "standard_deviation", "std_dev")
     if tile_hours:
         tile_hours.sort()
         mid = len(tile_hours) // 2

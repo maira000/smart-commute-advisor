@@ -448,8 +448,9 @@ def extract_tile_value(feature: dict, analytic_type: str) -> float:
     """
     Pulls the numeric value out of a single FortyGuard map tile.
 
-    For 'tcm' the tiles carry a temperature (properties.temperature or temp);
-    for 'exceedance'/'persistence' they carry hours above threshold
+    For 'tcm' the tiles carry a temperature (properties.temperature, temp,
+    average_temperature, min_temperature or max_temperature); for
+    'exceedance'/'persistence' they carry hours above threshold
     (properties.value or value_hour). Falls back to 0.0 so a missing tile
     never crashes the renderer.
     """
@@ -458,7 +459,18 @@ def extract_tile_value(feature: dict, analytic_type: str) -> float:
         return 0.0
     if analytic_type != "tcm":
         return properties.get("value") or properties.get("value_hour") or 0.0
-    return properties.get("temperature") or properties.get("temp") or 0.0
+    for key in (
+        "temperature",
+        "temp",
+        "average_temperature",
+        "value",
+        "min_temperature",
+        "max_temperature",
+    ):
+        val = properties.get(key)
+        if isinstance(val, (int, float)):
+            return float(val)
+    return 0.0
 
 
 def tile_value_scale(analytic_type: str):
@@ -1179,22 +1191,26 @@ with col_map:
     tile_label, tile_colors, _ = tile_value_scale(active_analytic)
     if tile_layer is not None and len(tile_layer._children) > 0:
         swatches = "".join(
-            f'<span style="color:{c}">●</span> &nbsp;' for c in tile_colors
+            f'<span style="color:{c}">&#9679;</span>&nbsp;' for c in tile_colors
         )
-        st.markdown(
-            f"**{tile_label} (tiles):** {swatches} "
-            f"low&nbsp;→&nbsp;high — colored polygon tiles are the underlying "
-            f"FortyGuard cell data for `{active_analytic}`.",
-            unsafe_allow_html=True,
+        tile_legend = (
+            f'<span style="font-weight:600;">{tile_label} (tiles):</span> {swatches}'
+            f'&nbsp;low&nbsp;&rarr;&nbsp;high &#8212; colored polygon tiles are the '
+            f'underlying FortyGuard cell data for <code>{active_analytic}</code>.<br>'
         )
+    else:
+        tile_legend = ""
 
-    st.markdown(
-        f'<span style="color:{RISK_HEX["green"]}">● Low</span> &nbsp; '
-        f'<span style="color:{RISK_HEX["yellow"]}">● Moderate</span> &nbsp; '
-        f'<span style="color:{RISK_HEX["orange"]}">● High</span> &nbsp; '
-        f'<span style="color:{RISK_HEX["red"]}">● Extreme</span> — '
-        "circles = area risk level (larger = more hours above threshold). Click any marker for details.",
-        unsafe_allow_html=True,
+    st.html(
+        f'<div style="font-size: 0.9em; line-height: 1.6;">'
+        f'{tile_legend}'
+        f'<span style="color:{RISK_HEX["green"]}">&#9679; Low</span>&nbsp; '
+        f'<span style="color:{RISK_HEX["yellow"]}">&#9679; Moderate</span>&nbsp; '
+        f'<span style="color:{RISK_HEX["orange"]}">&#9679; High</span>&nbsp; '
+        f'<span style="color:{RISK_HEX["red"]}">&#9679; Extreme</span> &#8212; '
+        f'circles = area risk level (larger = more hours above threshold). '
+        f'Click any marker for details.'
+        f'</div>'
     )
 
 with col_chart:
