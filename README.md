@@ -2,7 +2,7 @@
 
 # Smart Commute & Outdoor Activity Advisor
 
-A Streamlit app that recommends the safest time to walk, run, or commute in Phoenix, AZ based on heat exposure — built for FortyGuard Hackathon '26.
+*Know before you go — heat-smart routes and timing for Phoenix, AZ*
 
 ## How to Run It
 
