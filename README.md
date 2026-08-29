@@ -1,4 +1,4 @@
-![Smart Commute & Outdoor Activity Advisor](assets/cover_banner.svg)
+<img src="assets/cover_banner.svg" alt="Smart Commute & Outdoor Activity Advisor" width="100%">
 
 # Smart Commute & Outdoor Activity Advisor
 
