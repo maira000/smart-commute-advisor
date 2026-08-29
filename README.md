@@ -158,6 +158,130 @@ The completed result is saved verbatim to `data/` by the caching layer. This is 
 }
 ```
 
+### Bonus: TCM (raw temperature) example
+
+This is a real captured response from `data/downtown_phoenix_2026-07-15_tcm.json`, showing the `tcm` analytic type returning raw 2-meter temperature grid data instead of exposure-hour aggregates.
+
+#### Request (POST /v1/heatmap)
+The same Downtown Phoenix AOI and date requested with `analytic_type` set to `"tcm"` — note there are no `threshold`/`direction` fields, since a raw temperature snapshot doesn't use a threshold:
+
+```http
+POST https://api.fortyguard.com/v1/heatmap
+api-key: <FORTYGUARD_API_KEY>
+Content-Type: application/json
+```
+
+```json
+{
+  "polygon_aoi": {
+    "type": "FeatureCollection",
+    "features": [
+      {
+        "type": "Feature",
+        "properties": {},
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [-112.0821, 33.4417],
+              [-112.0821, 33.4551],
+              [-112.0659, 33.4551],
+              [-112.0659, 33.4417],
+              [-112.0821, 33.4417]
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  "date_time": {
+    "start_date": "2026-07-15",
+    "filter_type": 3
+  },
+  "granularity": 100,
+  "analytic_type": "tcm"
+}
+```
+
+#### Response (200 OK — Completed)
+The `tcm` response is a raw temperature grid: 165 tile features, each carrying per-tile `average_temperature`, `min_temperature`, and `max_temperature`. Below are the first 2 tiles as a representative sample — the rest are truncated for brevity:
+
+```json
+{
+  "map_data": {
+    "type": "FeatureCollection",
+    "features": [
+      {
+        "id": "0",
+        "type": "Feature",
+        "properties": {
+          "tile_id": 0,
+          "average_temperature": 37.3158,
+          "min_temperature": 32.8884,
+          "max_temperature": 40.7798
+        },
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [-112.07758086419294, 33.44165867544603],
+              [-112.07652196865251, 33.44166787298159],
+              [-112.07653291739332, 33.442554241246675],
+              [-112.07759182369813, 33.44254504340345],
+              [-112.07758086419294, 33.44165867544603]
+            ]
+          ]
+        }
+      },
+      {
+        "id": "1",
+        "type": "Feature",
+        "properties": {
+          "tile_id": 1,
+          "average_temperature": 37.3088,
+          "min_temperature": 32.8635,
+          "max_temperature": 40.7884
+        },
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [-112.07652196865251, 33.44166787298159],
+              [-112.07546307263149, 33.441677061477925],
+              [-112.07547401060786, 33.44256343005037],
+              [-112.07653291739332, 33.442554241246675],
+              [-112.07652196865251, 33.44166787298159]
+            ]
+          ]
+        }
+      }
+      // ... 163 more tiles (full response has 165 tile features)
+    ]
+  },
+  "stats_data": {
+    "temperature_stats": {
+      "minimum": 37.2439,
+      "maximum": 37.3173,
+      "mean": 37.278861212121214,
+      "standard_deviation": 0.023653934308649392
+    },
+    "overall_temperature_distribution": [
+      37.2439,
+      37.2559,
+      37.2778,
+      37.3016,
+      37.3173
+    ]
+    // the full response also includes "normal_temperature_distribution" and
+    // "temperature_frequency" arrays (omitted here for brevity)
+  }
+}
+```
+
+Note: `temperature_stats` is included verbatim above. The full response's `stats_data` also includes `normal_temperature_distribution` and `temperature_frequency` arrays (not pasted here) — the app's histogram visualization uses those to plot the temperature spread across the AOI.
+
+Together these two examples show FortyGuard's two data shapes: instantaneous temperature snapshots (`tcm`) versus cumulative exposure-over-time metrics (`exceedance`/`persistence`) — the mathematical distinction the app's Innovation angle relies on.
+
 ## Known Limitations
 Some honest caveats about what doesn't fully work yet:
 
