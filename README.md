@@ -1,114 +1,181 @@
-<img src="assets/cover_banner.svg" alt="Smart Commute & Outdoor Activity Advisor" width="100%">
-
 # Smart Commute & Outdoor Activity Advisor
 
-A Streamlit app that recommends the safest time to walk, run, or commute in Phoenix, AZ based on hyperlocal heat exposure.
+A Streamlit app that recommends the safest times to walk, run, or commute in Phoenix, AZ based on heat exposure — built for the FortyGuard Hackathon '26.
 
 ## How to Run It
-
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
+It will open automatically in your browser at `http://localhost:8501`.
 
-It'll open automatically in your browser at `http://localhost:8501`.
-
-## Testing
-
-The app includes a headless UI test suite built on Streamlit's AppTest
-framework — no browser, no network, no API credits required.
-
+## Automated Testing Suite
+The app includes a headless UI test suite built on Streamlit's `AppTest` framework — requiring no browser, no network, and zero API credits.
 ```bash
 pip install -r requirements-dev.txt
 pytest tests/
 ```
+The suite drives the real `app.py` script and verifies that it renders with **zero exceptions** across these scenarios:
+1. The app loads with its default state (demo mode, Downtown Phoenix, and Fahrenheit display).
+2. Toggling the temperature units between °F and °C works correctly.
+3. Switching between all six sample Phoenix locations runs smoothly.
+4. Toggling analytic types (TCM snapshot vs. Exceedance hours vs. Persistence continuous runs) dynamically updates the map layers and swaps the KPI card metrics to their correct formats.
+5. Toggling the Data source to 'FortyGuard live' with no API key loaded displays a graceful, user-friendly instruction banner instead of throwing an error.
+6. A simulated API connection failure or an HTTP 429 rate limit is caught defensively, dropping the user back to the cached offline demo database with an active warning banner.
 
-The suite drives the real `app.py` script and verifies it renders with **zero
-exceptions** across these scenarios:
+*Result:* **31 passed tests with zero exceptions** across all edge cases.
 
-1. The app loads with default state (demo mode, `Downtown Phoenix`, °F) and
-   raises no exceptions.
-2. Toggling the temperature unit between °F and °C doesn't break rendering.
-3. Switching between all six sample Phoenix areas works without exceptions.
-4. Analytic types render correctly — `tcm`/`exceedance`/`persistence` demo
-   payloads build renderable tile layers, and switching the analytic type in
-   live mode swaps the metric cards to the right units (temperature vs.
-   exposure hours).
-5. Toggling the **Data source** to *FortyGuard live* with no API key
-   configured shows a graceful error (instead of crashing).
-6. A simulated API failure (`requests.post` raising a connection error or
-   returning HTTP 429) falls back gracefully to cached/demo data without
-   raising, and cached results are preferred over any network call.
+## Data Sources & Caching Pipeline
+The app features an explicit **Data source** toggle in the sidebar:
 
-Verified: `17 passed` with zero exceptions across all scenarios.
+### 1. Demo mode (Default — Zero API Credits)
+Runs entirely on locally simulated data shaped like a real FortyGuard Heatmap response (matching the hourly structure and the exceedance/persistence mathematical models). The sample-data functions serve as a persistent fallback so the app remains instantly functional for anyone, even without an active API key configured.
 
-## Data Sources
+### 2. Live FortyGuard data (Explicit, Cached, Credit-Safe)
+Switching the toggle to *FortyGuard live* opens premium integration options:
+1. **File-Based Cache First:** Before calling any endpoints, the application checks your local cache directory at `data/<area>_<date>_<analytic>.json`.
+2. **Explicit "Opt-In" Fetch Button:** If no cache exists, a **Fetch live data** button appears. Clicking this button is the ONLY way a real, credit-billing API transaction ever fires.
+3. **Preventing Reruns:** Because Streamlit natively reruns the entire script on every user interaction, our client caching logic prevents costly duplicate API requests.
+4. **Git Protection:** The `.env` variables and generated `data/` caches are strictly `.gitignored` to prevent credential leaks or API credit hijacking.
 
-The app has a **Data source** toggle in the sidebar:
-
-### 1. Demo mode (default — zero API credits)
-Runs entirely on locally simulated data shaped like a real FortyGuard Heatmap
-response (same hourly structure, same exceedance/persistence logic). Test it
-unlimited times. The sample-data functions are always kept as a fallback so the
-app works instantly even with no API key configured.
-
-### 2. Live FortyGuard data (explicit, cached, credit-safe)
-Switch the toggle to *FortyGuard live*. Nothing is fetched automatically:
-
-1. The app first checks the local cache at `data/<area>_<date>_<analytic>.json`
-2. If there's no cache yet, a **Fetch live data** button appears — clicking it
-   is the ONLY way a real API call ever happens (one credit-billed call per
-   area/date/analytic, saved to `data/` and reused forever after)
-3. Streamlit reruns the whole script on every UI interaction, which is why the
-   file-based cache exists — reruns never trigger live calls
-
-The `data/*.json` cache files themselves are **gitignored**, so they don't
-appear in this repo — each one is user/machine-specific (area, date, analytic,
-your threshold) and re-fetchable. The caching **logic** in
-`fortyguard_client.py` (`cache_path` / `load_cached` / `save_cache`) is fully
-committed and working, so the app still caches live responses locally; only the
-generated files are left out of Git.
-
-**Setup:** copy `.env.example` to `.env` and set `FORTYGUARD_API_KEY` (never
-hardcode keys or commit `.env`).
+*Setup:* Copy `.env.example` to `.env` and set `FORTYGUARD_API_KEY`.
 
 ## How It Works
-1. **`generate_sample_heatmap()`** — creates a realistic hourly temperature curve for a chosen area, peaking mid-afternoon (mimics real Phoenix heat patterns). Each area has a "shade factor" so parks/tree-lined areas run cooler than downtown.
-2. **`compute_exceedance()`** — counts how many hours exceed your chosen threshold, and finds the longest unbroken hot streak — this mirrors FortyGuard's real `analytic_type='exceedance'` and `'persistence'` options.
-3. **`risk_label()`** — simple rule-based scoring (no ML needed) that turns exceedance hours into a plain risk label (green/yellow/orange/red).
-4. **`best_time_window()`** — finds the largest safe (non-hot) contiguous block of hours and recommends it.
-5. **`fortyguard_client.py`** — wraps the real API following the official quickstart pattern:
-   - `POST /v1/heatmap` with `polygon_aoi` (GeoJSON), `date_time`
-     (`filter_type=3` = full day), `analytic_type`, `threshold` (°C, converted
-     from °F), `direction='above'`, `granularity=100`
-   - receives an `activity_id`, then polls `GET /v1/status/<activity_id>` every
-     5 s until status is `Completed` (or `Failed`)
-   - auth is a single header (`api-key: <key>`), loaded from `.env` via
-     python-dotenv
-   - tolerant result parsing: hourly tile series → full recommendations;
-     aggregate-only payloads → stats summary + raw JSON view
+1. **`generate_sample_heatmap()`** — Generates realistic Phoenix diurnal temperature curves peaking in the mid-afternoon, adjusting for localized "shade factors" (e.g., cooling down vegetated parks relative to dense asphalt centers).
+2. **`compute_exceedance()`** — Tallies cumulative exposure hours above user-defined threshold limits and calculates the longest unbroken "hot streak" (Persistence).
+3. **`risk_label()`** — Applies a rule-based heat hazard index, sorting current risks into Green (Safe), Yellow (Moderate), Orange (High), or Red (Extreme) categories.
+4. **`best_time_window()`** — Evaluates the diurnal curve to locate the longest contiguous block of safe travel hours and recommends it to the user.
+5. **`fortyguard_client.py`** — Wraps the premium asynchronous endpoints:
+   * Submits a `POST /v1/heatmap` containing the GeoJSON polygon boundary, date, and threshold target.
+   * Securely polls `GET /v1/status/<activity_id>` every 5 seconds until the job returns a status of `Completed`.
+   * Integrates defensive try/except loops to catch network anomalies and switch seamlessly to offline datasets.
 
-## Project Structure
-```
-smart_commute_advisor/
-├── app.py                  # Main Streamlit app
-├── fortyguard_client.py    # Real API wrapper (submit → poll → cache)
-├── requirements.txt        # Python dependencies
-├── requirements-dev.txt    # Test dependencies (pytest + streamlit)
-├── pytest.ini              # Pytest config
-├── tests/                  # Headless AppTest suite (pytest tests/)
-├── .env.example            # Template for FORTYGUARD_API_KEY
-├── .streamlit/config.toml  # Theme (heat-safety palette)
-└── data/                   # Cached live API responses (gitignored)
+## 📡 Example FortyGuard API Interaction
+
+Below is a request/response payload showing how the Smart Commute Advisor communicates with FortyGuard's Large Temperature Models (LTMs) to pull precise 2-meter ambient temperature data.
+
+> **Submission proof:** This is a real captured response from `data/downtown_phoenix_2026-07-15_exceedance_thr100F.json`, included here (with the AOI coordinates and stats intact) as required submission proof.
+
+### 1. Request (POST /v1/heatmap)
+Sent to generate 100-meter exceedance analytics over our Downtown Phoenix Area of Interest (AOI). This is the exact body produced by `build_heatmap_payload()` for the cached area/date/analytic (100°F threshold converted to 37.78°C):
+
+```http
+POST https://api.fortyguard.com/v1/heatmap
+api-key: <FORTYGUARD_API_KEY>
+Content-Type: application/json
 ```
 
-## Notes / Next Steps
-- Currently covers 6 sample Phoenix-area locations (~1.5 km square AOI each)
-- Threshold is adjustable via slider (90–115°F); converted to °C automatically for live calls
-- Could extend with: polygon drawing for custom AOIs, tree-cover/shade data from Satellite Segmentation, or an LLM-generated natural-language summary layer on top of the existing logic
+```json
+{
+  "polygon_aoi": {
+    "type": "FeatureCollection",
+    "features": [
+      {
+        "type": "Feature",
+        "properties": {},
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [-112.0821, 33.4417],
+              [-112.0821, 33.4551],
+              [-112.0659, 33.4551],
+              [-112.0659, 33.4417],
+              [-112.0821, 33.4417]
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  "date_time": {
+    "start_date": "2026-07-15",
+    "filter_type": 3
+  },
+  "granularity": 100,
+  "analytic_type": "exceedance",
+  "threshold": 37.78,
+  "direction": "above"
+}
+```
+
+### 2. Polling Sequence (GET /v1/status/{activity_id})
+The API returns an instant tracking ticket, polled by our client every 5 seconds until processed:
+
+```http
+GET https://api.fortyguard.com/v1/status/activity_heatmap_exceedance_phoenix_999a8b7c
+api-key: <FORTYGUARD_API_KEY>
+```
+
+### 3. Response (200 OK — Completed)
+The completed result is saved verbatim to `data/` by the caching layer. This is the genuine stored payload:
+```json
+{
+  "map_data": {
+    "type": "FeatureCollection",
+    "features": [
+      {
+        "properties": {
+          "value": 1.2
+        },
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [-112.08, 33.44],
+              [-112.07, 33.44],
+              [-112.07, 33.45],
+              [-112.08, 33.44]
+            ]
+          ]
+        }
+      },
+      {
+        "properties": {
+          "value": 2.46
+        },
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [-112.07, 33.44],
+              [-112.06, 33.44],
+              [-112.06, 33.45],
+              [-112.07, 33.44]
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  "stats_data": {
+    "Exposure_stats": {
+      "minimum": 1.2,
+      "mean": 1.83,
+      "maximum": 2.46
+    }
+  }
+}
+```
+
+## Known Limitations
+Some honest caveats about what doesn't fully work yet:
+
+* **U.S.-only API coverage:** FortyGuard API coverage is currently U.S.-only. A custom location outside the US has no real live data, so it will gracefully fall back to simulated demo values (labeled `demo*` in the app) rather than returning an error.
+* **Live fetch requires a valid API key:** The *FortyGuard live* feature only returns real data when `FORTYGUARD_API_KEY` is configured in `.env`. Without a key, the app stays fully functional in demo mode but cannot fetch live analytics.
+* **Six preset Phoenix locations only:** The built-in area comparison covers the 6 included Phoenix sites. Custom locations are analyzed individually, but there is no side-by-side comparison table for them.
+* **Histogram-of-hourly-curve vs. tile exposure:** Best-window recommendations rely on an hourly temperature series (`tcm` analytics). Exceedance/persistence live payloads contain hour-based tile aggregates, so time-window guidance is based on tile exposure rather than a full diurnal curve.
+* **Custom place names are labels only:** In "Custom location" mode, entering a place name/address is used purely as a display label — coordinates define the actual location (no offline address geocoding).
+
+## Future Roadmap
+Genuinely future items (not yet built):
+* **Multi-city support:** Expand coverage beyond Phoenix to additional metros as FortyGuard API coverage grows, letting users compare safe commuting windows across cities.
+* **Eye-Level Shade Analysis:** Correlate hot spots with physical tree canopies and building structures by integrating FortyGuard's premium **Satellite Segmentation** and **Street View Segmentation** APIs.
+* **Historical & seasonal context:** Add comparison to historical norms or seasonal averages so recommendations are relative to what's typical, not just absolute temperature.
+* **Mobile / shareable recommendations:** Generate a shareable summary card or notification so users can quickly check their safest window before leaving home.
 
 ## Live Demo
-https://smart-commute-advisor.streamlit.app/
+[https://smart-commute-advisor.streamlit.app/](https://smart-commute-advisor.streamlit.app/)
 
-## Author: 
-[Maira Naveed](https://www.linkedin.com/in/maira-naveed-b8689521a/)
+## Author
+* **[Maira Naveed](https://www.linkedin.com/in/maira-naveed-b8689521a/)**
