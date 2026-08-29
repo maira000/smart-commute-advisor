@@ -1,3 +1,5 @@
+<img src="assets/cover_banner.svg" alt="Smart Commute & Outdoor Activity Advisor" width="100%">
+
 # Smart Commute & Outdoor Activity Advisor
 
 A Streamlit app that recommends the safest times to walk, run, or commute in Phoenix, AZ based on heat exposure — built for the FortyGuard Hackathon '26.
