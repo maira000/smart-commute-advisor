@@ -303,5 +303,6 @@ Genuinely future items (not yet built):
 ## Live Demo
 [https://smart-commute-advisor.streamlit.app/](https://smart-commute-advisor.streamlit.app/)
 
-## Author
-* **[Maira Naveed](https://www.linkedin.com/in/maira-naveed-b8689521a/)**
+#### Authors:
+* **Maira Naveed**
+* **Khadeeja Ansari**
