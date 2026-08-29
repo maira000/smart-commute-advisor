@@ -2,7 +2,7 @@
 
 # Smart Commute & Outdoor Activity Advisor
 
-*Know before you go — heat-smart routes and timing for Phoenix, AZ*
+A Streamlit app that recommends the safest time to walk, run, or commute in Phoenix, AZ based on hyperlocal heat exposure.
 
 ## How to Run It
 
