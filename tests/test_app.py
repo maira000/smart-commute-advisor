@@ -308,6 +308,9 @@ def test_live_mode_without_api_key_is_graceful(app, no_api_key, isolated_cache):
 
     assert_no_exceptions(app)
     assert any("No API key" in e.value for e in app.error)
+    assert any(
+        t.label == "FortyGuard API key (optional)" for t in app.sidebar.text_input
+    )
 
 
 # ----------------------------------------------------------------------

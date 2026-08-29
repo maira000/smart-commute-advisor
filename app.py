@@ -1037,8 +1037,17 @@ with st.sidebar:
             "Responses are cached under data/ and reused — a live call happens "
             "**only** when you click *Fetch live data*."
         )
-        creds_ok = has_credentials()
-        if not creds_ok:
+        ui_key = st.text_input(
+            "FortyGuard API key (optional)",
+            type="password",
+            key="api_key",
+            placeholder="Paste your api key…",
+            help=(
+                "Reserved UI element — not currently wired to any call. Live "
+                "fetches read FORTYGUARD_API_KEY from `.env`."
+            ),
+        )
+        if not has_credentials():
             st.warning(
                 "No API key found. Copy `.env.example` to `.env` and add your key "
                 "(demo mode keeps working without one).",
